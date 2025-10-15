@@ -1,0 +1,37 @@
+# ===================================================================
+# Arquivo .gitignore para o MeLembra Server (Node.js + TypeScript)
+# ===================================================================
+
+# 1. SEGURANÇA E DADOS DE SESSÃO
+# Nunca envie suas chaves secretas ou arquivos de sessão para o repositório.
+.env
+.wwebjs_auth/
+.wwebjs_cache/
+
+
+# 2. DEPENDÊNCIAS
+# A pasta node_modules é recriada automaticamente ao rodar `npm install`.
+# É a pasta mais importante a ser ignorada.
+node_modules/
+
+
+# 3. SAÍDA DE BUILD (BUILD OUTPUT)
+# A pasta `dist` contém o código JavaScript compilado.
+# O servidor de produção (Fly.io) irá gerar isso sozinho durante o deploy.
+dist/
+
+
+# 4. LOGS
+# Arquivos de log de erro e debug gerados pelo npm ou yarn.
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+
+# 5. ARQUIVOS DE SISTEMA OPERACIONAL E EDITOR DE CÓDIGO
+# Lixo gerado pelo macOS, Windows e editores como VS Code.
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
