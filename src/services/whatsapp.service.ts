@@ -33,7 +33,20 @@ client.on('auth_failure', (msg) => {
 })
 
 client.on('disconnected', (reason) => {
-    console.log('Client disconnected', reason)
+    console.log('Cliente desconectado:', reason)
+    console.log('Tentando reinicializar o cliente em 10 segundos...')
+    // Tenta reinicializar para gerar um novo QR Code se a sessão for perdida
+    setTimeout(() => {
+        client.initialize().catch(err => {
+            console.error('Falha ao reinicializar o cliente:', err)
+            // Em caso de falha grave, encerra o processo para ser reiniciado pelo PM2/Docker
+            process.exit(1)
+        })
+    }, 10000)
+})
+
+client.on('error', (err) => {
+    console.error('Ocorreu um erro no cliente do WhatsApp:', err)
 })
 
 client.initialize()
@@ -87,40 +100,39 @@ async function sendPersonalReminders() {
 
         // --- LÓGICA DE RECORRÊNCIA ---
         const recurrence = reminder.recurrence || 'Não repetir'
+
+        // Se não for recorrente, apenas marca como enviado e continua
+        if (recurrence === 'Não repetir') {
+            await doc.ref.update({ sent: true })
+            console.log(`Lembrete ${doc.id} marcado como concluído.`)
+            continue // Pula para o próximo lembrete
+        }
+
         let nextScheduledAt: Date | null = null
         const currentScheduledAt = reminder.scheduledAt.toDate()
+        nextScheduledAt = new Date(currentScheduledAt) // Cria uma nova instância
 
         switch (recurrence) {
             case 'Diariamente':
-                nextScheduledAt = new Date(currentScheduledAt)
                 nextScheduledAt.setDate(nextScheduledAt.getDate() + 1)
                 break
             case 'Semanalmente':
-                nextScheduledAt = new Date(currentScheduledAt)
                 nextScheduledAt.setDate(nextScheduledAt.getDate() + 7)
                 break
             case 'Mensalmente':
-                nextScheduledAt = new Date(currentScheduledAt)
                 nextScheduledAt.setMonth(nextScheduledAt.getMonth() + 1)
                 break
             case 'Anualmente':
-                nextScheduledAt = new Date(currentScheduledAt)
                 nextScheduledAt.setFullYear(nextScheduledAt.getFullYear() + 1)
                 break
-            case 'Não repetir':
-            default:
-                // Se não for recorrente, apenas marca como enviado
-                await doc.ref.update({ sent: true })
-                console.log(`Lembrete ${doc.id} marcado como concluído (não recorrente).`)
-                continue // Pula para o próximo lembrete no loop
         }
 
-        // Se for recorrente, atualiza para a próxima data
+        // Atualiza o lembrete com a nova data e mantém 'sent' como false
         if (nextScheduledAt) {
             await doc.ref.update({
                 scheduledAt: admin.firestore.Timestamp.fromDate(nextScheduledAt)
             })
-            console.log(`Lembrete ${doc.id} reagendado para ${nextScheduledAt.toISOString()} devido à recorrência '${recurrence}'.`)
+            console.log(`Lembrete ${doc.id} reagendado para ${nextScheduledAt.toISOString()}.`)
         }
     }
 }
