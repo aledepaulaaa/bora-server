@@ -1,11 +1,12 @@
 //melembra-server/src/services/whatsapp.service.ts
-import { Client, LocalAuth } from 'whatsapp-web.js'
+import fs from 'fs'
+import * as chrono from 'chrono-node'
+import { Buttons, Client, LocalAuth, Message } from 'whatsapp-web.js'
 import qrcode from 'qrcode-terminal'
 import cron, { ScheduledTask } from 'node-cron'
 import admin from 'firebase-admin'
 import { getFirebaseFirestore } from '../database/firebase-admin'
 import { IReminder } from '../interfaces/IReminder'
-import fs from 'fs'
 
 // Connect to Firestore using the function from your new module
 const db = getFirebaseFirestore()
@@ -20,7 +21,6 @@ function createAndConfigureClient() {
     client = new Client({
         authStrategy: new LocalAuth(),
         puppeteer: {
-            // Necessário para rodar em ambientes de servidor (como Docker/Linux)
             args: ['--no-sandbox', '--disable-setuid-sandbox'],
         }
     })
@@ -32,32 +32,22 @@ function createAndConfigureClient() {
 
     client.on('ready', () => {
         console.log('✅ Cliente WhatsApp está pronto!')
-        startCronJobs() // Inicia as tarefas agendadas apenas quando o cliente está online
+        startCronJobs()
     })
 
-    client.on('authenticated', () => {
-        console.log('✅ Autenticado com sucesso!')
-    })
-
-    client.on('auth_failure', (msg) => {
-        console.error('❌ Falha na autenticação:', msg)
-    })
-
-    client.on('error', (err) => {
-        console.error('Ocorreu um erro inesperado no cliente:', err)
-    })
+    client.on('authenticated', () => console.log('✅ Autenticado com sucesso!'))
+    client.on('auth_failure', (msg) => console.error('❌ Falha na autenticação:', msg))
+    client.on('error', (err) => console.error('Ocorreu um erro inesperado no cliente:', err))
 
     client.on('disconnected', async (reason) => {
         console.log('Cliente desconectado:', reason)
-        stopCronJobs() // Para as tarefas agendadas para evitar erros
+        stopCronJobs()
 
         try {
             await client.destroy()
             console.log("Instância do cliente destruída.")
-
             const sessionPath = './.wwebjs_auth'
             if (fs.existsSync(sessionPath)) {
-                console.log("Limpando pasta de sessão antiga...")
                 await fs.promises.rm(sessionPath, { recursive: true, force: true })
                 console.log("Sessão limpa com sucesso.")
             }
@@ -68,7 +58,11 @@ function createAndConfigureClient() {
             setTimeout(createAndInitialize, 10000)
         }
     })
+
+    // --- CÉREBRO DO BOT: Listener para mensagens recebidas ---
+    client.on('message', handleIncomingMessage)
 }
+
 
 /**
  * Chama a criação do cliente e inicia o processo de conexão.
@@ -84,9 +78,7 @@ function createAndInitialize() {
 // Inicia o fluxo pela primeira vez quando o servidor é ligado
 createAndInitialize()
 
-
 // --- GERENCIAMENTO DE TAREFAS AGENDADAS (CRON JOBS) ---
-
 const scheduledTasks: ScheduledTask[] = []
 
 function startCronJobs() {
@@ -107,6 +99,96 @@ function stopCronJobs() {
         scheduledTasks.length = 0 // Limpa o array
     }
 }
+
+// --- LÓGICA DO BOT INTERATIVO ---
+
+async function handleIncomingMessage(message: Message) {
+    const chatId = message.from
+    const conversationRef = db.collection('whatsapp_conversations').doc(chatId)
+    const conversationDoc = await conversationRef.get()
+
+    // Lida com cliques em botões
+    if (message.type === 'buttons_response' && message.selectedButtonId === 'create_reminder_tip') {
+        await startReminderFlow(chatId)
+        return
+    }
+
+    // Se não há uma conversa ativa, ignora a mensagem
+    if (!conversationDoc.exists) return
+
+    const state = conversationDoc.data()
+    if (!state) return
+
+    switch (state.step) {
+        case 'awaiting_title':
+            await handleTitleResponse(message, conversationRef, state.userId)
+            break
+        case 'awaiting_datetime':
+            await handleDateTimeResponse(message, conversationRef, state.userId)
+            break
+    }
+}
+
+async function startReminderFlow(chatId: string) {
+    const number = chatId.split('@')[0]
+    const usersQuery = await db.collection('users').where('whatsappNumber', '==', number).limit(1).get()
+
+    if (usersQuery.empty) {
+        client.sendMessage(chatId, "Desculpe, não encontrei sua conta Me Lembra. Verifique se o número de WhatsApp cadastrado no app está correto.")
+        return
+    }
+    const userId = usersQuery.docs[0].id
+
+    await db.collection('whatsapp_conversations').doc(chatId).set({
+        step: 'awaiting_title',
+        userId: userId,
+        reminderData: {},
+    })
+
+    client.sendMessage(chatId, 'Ótimo! Qual o título do seu lembrete?')
+}
+
+async function handleTitleResponse(message: Message, conversationRef: admin.firestore.DocumentReference, userId: string) {
+    const title = message.body
+    await conversationRef.update({
+        'reminderData.title': title,
+        step: 'awaiting_datetime',
+    })
+    client.sendMessage(message.from, `Entendido. E para quando é o lembrete "${title}"? (ex: amanhã às 15h, 25/12 18:00)`)
+}
+
+async function handleDateTimeResponse(message: Message, conversationRef: admin.firestore.DocumentReference, userId: string) {
+    const dateTimeString = message.body
+    const parsedDate = chrono.pt.parseDate(dateTimeString, new Date(), { forwardDate: true })
+
+    if (!parsedDate) {
+        client.sendMessage(message.from, 'Hum, não consegui entender essa data. 🤔 Tente um formato como "amanhã às 10:30" ou "25 de Dezembro às 20h".')
+        return
+    }
+
+    const conversationDoc = await conversationRef.get()
+    const reminderData = conversationDoc.data()?.reminderData
+
+    try {
+        await db.collection('reminders').add({
+            title: reminderData.title,
+            scheduledAt: admin.firestore.Timestamp.fromDate(parsedDate),
+            userId: userId,
+            createdAt: admin.firestore.Timestamp.now(),
+            sent: false,
+            recurrence: 'Não repetir',
+        })
+
+        await conversationRef.delete()
+
+        const successMessage = `Lembrete salvo com sucesso para ${parsedDate.toLocaleString('pt-BR')}! ✨\n\nPara criar lembretes com recorrência (diários, semanais, etc.), abra o app Me Lembra e personalize do seu jeito! 😉\n\nhttps://melembra.vercel.app/`
+        client.sendMessage(message.from, successMessage)
+    } catch (error) {
+        console.error("Erro ao salvar lembrete via WhatsApp:", error)
+        client.sendMessage(message.from, "Ocorreu um erro ao salvar seu lembrete. Por favor, tente novamente mais tarde.")
+    }
+}
+
 
 async function findUserPhoneNumber(userId: string): Promise<string | undefined> {
     try {
@@ -195,37 +277,64 @@ async function sendPersonalReminders() {
 }
 
 // 2. Cron job for tips
-async function sendDailyTips() {
-    console.log('Checking for tips to send...')
-    const usersRef = db.collection('users')
-    const usersSnapshot = await usersRef.get()
+// async function sendDailyTips() {
+//     console.log('Checking for tips to send...')
+//     const usersRef = db.collection('users')
+//     const usersSnapshot = await usersRef.get()
 
-    usersSnapshot.forEach(async (userDoc) => {
+//     usersSnapshot.forEach(async (userDoc) => {
+//         const userId = userDoc.id
+//         const userPreferencesRef = db.collection('preferences').doc(userId)
+//         const userPreferences = (await userPreferencesRef.get()).data()
+
+//         if (userPreferences?.enableTips !== false) {
+//             let tipMessage = ''
+//             const hour = new Date().getHours()
+
+//             if (hour === 12) {
+//                 tipMessage = 'Ei, hora do almoço! 🍽️ Quer criar um lembrete para isso?'
+//             } else if (hour === 18) {
+//                 const weekday = new Date().toLocaleDateString('pt-BR', { weekday: 'long' })
+//                 tipMessage = `Boa noite! ${weekday}, que tal criar alguns lembretes para a semana?`
+//             } else if (hour === 21) {
+//                 tipMessage = `${userDoc.data()?.name || 'Ei'}, hora de dormir! 😴 algo importante para anotar e não esquecer depois?`
+//             }
+
+//             if (tipMessage) {
+//                 const phoneNumber = await findUserPhoneNumber(userId)
+//                 if (phoneNumber) {
+//                     await sendWhatsappMessage(phoneNumber, tipMessage)
+//                 }
+//             }
+//         }
+//     })
+// }
+async function sendDailyTips() {
+    console.log('Verificando dicas para enviar...')
+    const usersSnapshot = await db.collection('users').get()
+
+    for (const userDoc of usersSnapshot.docs) {
         const userId = userDoc.id
-        const userPreferencesRef = db.collection('preferences').doc(userId)
-        const userPreferences = (await userPreferencesRef.get()).data()
+        const userPreferences = (await db.collection('preferences').doc(userId).get()).data()
 
         if (userPreferences?.enableTips !== false) {
-            let tipMessage = ''
+            let tipMessage: string | null = null
             const hour = new Date().getHours()
+            const name = userDoc.data()?.name?.split(' ')[0] || 'Ei'
 
-            if (hour === 12) {
-                tipMessage = 'Lunch time! 🍽️ Want to create a reminder for this?'
-            } else if (hour === 18) {
-                const weekday = new Date().toLocaleDateString('pt-BR', { weekday: 'long' })
-                tipMessage = `Good evening! ${weekday}, how about creating some reminders for the week?`
-            } else if (hour === 21) {
-                tipMessage = `${userDoc.data()?.name || 'Friend'}, time to sleep! 😴 Anything to jot down?`
-            }
+            if (hour === 12) tipMessage = 'Ei, hora do almoço! 🍽️ Quer criar um lembrete para não esquecer daquela pausa?'
+            if (hour === 18) tipMessage = `Final do dia, ${name}! Que tal agendar os lembretes importantes de amanhã?`
+            if (hour === 21) tipMessage = `Hora de relaxar, ${name}! 😴 Tem algo para anotar e não esquecer amanhã?`
 
             if (tipMessage) {
                 const phoneNumber = await findUserPhoneNumber(userId)
                 if (phoneNumber) {
-                    await sendWhatsappMessage(phoneNumber, tipMessage)
+                    const buttons = new Buttons(tipMessage, [{ body: 'Criar Lembrete', id: 'create_reminder_tip' }], 'Dica do Me Lembra', 'Responda para agendar')
+                    await sendWhatsappMessage(phoneNumber, buttons)
                 }
             }
         }
-    })
+    }
 }
 
 // 3. Cron job for daily list
@@ -248,13 +357,13 @@ async function sendDailyList() {
             .get()
 
         if (!dailyRemindersSnapshot.empty) {
-            let message = `Good morning, ${userDoc.data()?.name || 'friend'}! You have ${dailyRemindersSnapshot.size} reminders for today:\n\n`
+            let message = `Bom dia, ${userDoc.data()?.name || 'amigo'}! Você tem ${dailyRemindersSnapshot.size} lembretes para hoje:\n\n`
             dailyRemindersSnapshot.forEach((doc) => {
                 const reminder = doc.data() as IReminder
                 const time = reminder.scheduledAt.toDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
                 message += `- [${time}] ${reminder.title}\n`
             })
-            message += '\nFor more details, visit: [your-link-here]'
+            message += '\nPara mais detalhes, visite: http://melembra.vercel.app/lembretes'
 
             const phoneNumber = await findUserPhoneNumber(userId)
             if (phoneNumber) {
@@ -264,7 +373,7 @@ async function sendDailyList() {
     })
 }
 
-export async function sendWhatsappMessage(number: string, message: string) {
+export async function sendWhatsappMessage(number: string, message: string | Buttons) {
     // Verificação de segurança para garantir que o cliente está pronto
     if (!client || (await client.getState()) !== 'CONNECTED') {
         console.warn("Cliente não está conectado. A mensagem não foi enviada.")
