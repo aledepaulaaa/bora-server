@@ -392,3 +392,57 @@ export async function sendWhatsappMessage(number: string, message: string | Butt
         return { success: false, error: 'Falha ao enviar mensagem.' }
     }
 }
+
+async function notifyFreeUsersOfReset() {
+    console.log('Verificando usuários gratuitos para notificar sobre o reset da cota...')
+
+    const today = new Date()
+    const yesterdayStart = admin.firestore.Timestamp.fromDate(new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1))
+    const yesterdayEnd = admin.firestore.Timestamp.fromDate(new Date(today.getFullYear(), today.getMonth(), today.getDate()))
+
+    const usersWhoUsedQuota = await db.collection('users')
+        .where('lastFreeReminderAt', '>=', yesterdayStart)
+        .where('lastFreeReminderAt', '<', yesterdayEnd)
+        .get()
+
+    if (usersWhoUsedQuota.empty) {
+        console.log('Nenhum usuário para notificar hoje.')
+        return
+    }
+
+    console.log(`Encontrados ${usersWhoUsedQuota.docs.length} usuários. Verificando assinaturas e enviando notificações...`)
+
+    for (const userDoc of usersWhoUsedQuota.docs) {
+        const userId = userDoc.id
+        const subscriptionDoc = await db.collection('subscriptions').doc(userId).get()
+        
+        if (subscriptionDoc.exists && subscriptionDoc.data()?.status === 'active') {
+            continue
+        }
+
+        const userName = userDoc.data()?.name?.split(' ')[0] || 'pessoinha'
+        const message = `Oi, ${userName}! ✨ Seu lembrete diário gratuito no Me Lembra já está disponível novamente. Toque para criar!`
+
+        // 1. Envia notificação por WhatsApp (responsabilidade deste servidor)
+        const phoneNumber = userDoc.data()?.whatsappNumber
+        if (phoneNumber) {
+            await sendWhatsappMessage(phoneNumber, message)
+        }
+
+        // 2. Dispara a notificação Push (responsabilidade do app Next.js)
+        // Chama a API Route no app da Vercel para que ELE envie a notificação.
+        try {
+            const nextAppUrl = process.env.NEXT_APP_URL
+            const cronSecret = process.env.CRON_SECRET
+            await fetch(`${nextAppUrl}/api/cron/notificar-usuarios-gratuitos?secret=${cronSecret}`, {
+                method: 'POST',
+                // A API que criamos não precisa de um corpo, mas é uma boa prática
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId }), // Opcional: envia o userId para logs futuros
+            })
+            console.log(`Gatilho de notificação push enviado para o usuário: ${userId}`)
+        } catch (error) {
+            console.error(`Erro ao disparar gatilho de push para o usuário ${userId}:`, error)
+        }
+    }
+}
