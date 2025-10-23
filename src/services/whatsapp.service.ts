@@ -85,9 +85,18 @@ function startCronJobs() {
     stopCronJobs() // Garante que não haja tarefas duplicadas rodando
     console.log('Agendando cron jobs...')
 
+    // NOVO: Job de alta frequência para avisos prévios (Push Notification)
+    // Roda a cada 2 minutos
+    scheduledTasks.push(cron.schedule('*/2 * * * *', triggerUpcomingRemindersCheck))
+
+    // AJUSTADO: Job de frequência normal para lembretes no horário (WhatsApp)
+    // Roda a cada 5 minutos
     scheduledTasks.push(cron.schedule('*/5 * * * *', sendPersonalReminders))
-    scheduledTasks.push(cron.schedule('0 12,18,21 * * *', sendDailyTips))
+
+    // Jobs diários (sem alterações)
+    scheduledTasks.push(cron.schedule('0 7 * * *', notifyFreeUsersOfReset))
     scheduledTasks.push(cron.schedule('0 8 * * *', sendDailyList))
+    scheduledTasks.push(cron.schedule('0 12,18,21 * * *', sendDailyTips))
 
     console.log('✅ Cron jobs agendados com sucesso!')
 }
@@ -101,7 +110,6 @@ function stopCronJobs() {
 }
 
 // --- LÓGICA DO BOT INTERATIVO ---
-
 async function handleIncomingMessage(message: Message) {
     const chatId = message.from
     const conversationRef = db.collection('whatsapp_conversations').doc(chatId)
@@ -181,14 +189,14 @@ async function handleDateTimeResponse(message: Message, conversationRef: admin.f
 
         await conversationRef.delete()
 
-        const successMessage = `Lembrete salvo com sucesso para ${parsedDate.toLocaleString('pt-BR')}! ✨\n\nPara criar lembretes com recorrência (diários, semanais, etc.), abra o app Me Lembra e personalize do seu jeito! 😉\n\nhttps://melembra.vercel.app/`
+        const successMessage = `Lembrete salvo com sucesso para ${parsedDate.toLocaleString('pt-BR')}! 
+        ✨\n\nPara criar lembretes com recorrência (diários, semanais, etc.), abra o app Me Lembra e personalize do seu jeito! 😉\n\nhttps://melembra.vercel.app/`
         client.sendMessage(message.from, successMessage)
     } catch (error) {
         console.error("Erro ao salvar lembrete via WhatsApp:", error)
         client.sendMessage(message.from, "Ocorreu um erro ao salvar seu lembrete. Por favor, tente novamente mais tarde.")
     }
 }
-
 
 async function findUserPhoneNumber(userId: string): Promise<string | undefined> {
     try {
@@ -207,9 +215,34 @@ async function findUserPhoneNumber(userId: string): Promise<string | undefined> 
     }
 }
 
+/**
+ * NOVO: Função que chama a API do Next.js para verificar e enviar avisos prévios.
+ */
+async function triggerUpcomingRemindersCheck() {
+    console.log('Disparando verificação de lembretes próximos (aviso de 5 min)...')
+    try {
+        const nextAppUrl = process.env.NEXT_APP_URL
+        const cronSecret = process.env.CRON_SECRET
+
+        const response = await fetch(`${nextAppUrl}/api/cron/notificar-proximos-lembretes?secret=${cronSecret}`, {
+            method: 'POST',
+        })
+
+        if (!response.ok) {
+            console.error(`Erro ao disparar o gatilho de avisos prévios. Status: ${response.status}`)
+        } else {
+            const result = await response.json()
+            console.log(`Resposta da verificação de avisos prévios: ${result.message}`)
+        }
+    } catch (error) {
+        console.error('Erro de rede ao disparar o gatilho de avisos prévios:', error)
+    }
+}
+
+
 // 1. Cron job for personal reminders
 async function sendPersonalReminders() {
-    console.log('Verificando lembretes pessoais...')
+    console.log('Verificando lembretes no horário (WhatsApp)...')
     const now = new Date()
     // Buscamos lembretes até a hora atual para não perder nenhum
     const nowTimestamp = admin.firestore.Timestamp.fromDate(now)
@@ -374,17 +407,36 @@ async function sendDailyList() {
 }
 
 export async function sendWhatsappMessage(number: string, message: string | Buttons) {
-    // Verificação de segurança para garantir que o cliente está pronto
     if (!client || (await client.getState()) !== 'CONNECTED') {
-        console.warn("Cliente não está conectado. A mensagem não foi enviada.")
+        console.warn("Cliente não está conectado. Mensagem não enviada.")
         return { success: false, error: 'Cliente WhatsApp não conectado.' }
     }
 
-    const sanitizedNumber = number.replace(/\D/g, '')
-    const finalNumber = `55${sanitizedNumber}@c.us`
+    // --- CORREÇÃO DA FORMATAÇÃO DO NÚMERO ---
+    
+    // 1. Limpa tudo que não for dígito.
+    let sanitizedNumber = number.replace(/\D/g, '')
+
+    // 2. Garante que o número tenha o código do país (55).
+    // Se o número começar com '55' e tiver mais de 11 dígitos (55 + DDD + numero), está ok.
+    // Se não, assume que falta o 55 e o adiciona.
+    if (sanitizedNumber.length <= 11) {
+        sanitizedNumber = `55${sanitizedNumber}`
+    }
+
+    // 3. Adiciona o sufixo do WhatsApp.
+    const finalNumber = `${sanitizedNumber}@c.us`
+    
+    // --- FIM DA CORREÇÃO ---
 
     try {
-        await client.sendMessage(finalNumber, message)
+        // A biblioteca também tem um método 'getNumberId' que é mais robusto para verificar.
+        const chat = await client.getChatById(finalNumber);
+        if (!chat) {
+             throw new Error(`Chat não encontrado para o número ${finalNumber}`);
+        }
+        
+        await chat.sendMessage(message)
         console.log(`Mensagem enviada para ${number}`)
         return { success: true }
     } catch (error) {
