@@ -7,13 +7,55 @@ import { IReminder } from '../interfaces/IReminder'
 
 const db = getFirebaseFirestore()
 
+// --- NOVA FUNÇÃO DE VALIDAÇÃO ---
+
+/**
+ * Valida um número de WhatsApp usando a RapidAPI.
+ * @param number O número de telefone a ser validado.
+ * @returns {Promise<boolean>} True se o número for válido, false caso contrário.
+ */
+async function validateWhatsappNumber(number: string): Promise<boolean> {
+    // Normaliza o número para o formato esperado pela API (com código do país)
+    let sanitizedNumber = number.replace(/\D/g, '')
+    if (sanitizedNumber.length <= 11) {
+        sanitizedNumber = `55${sanitizedNumber}`
+    }
+
+    const url = 'https://whatsapp-number-validator3.p.rapidapi.com/WhatsappNumberHasItWithToken'
+    const options = {
+        method: 'POST',
+        headers: {
+            'x-rapidapi-key': process.env.RAPID_API_KEY!,
+            'x-rapidapi-host': process.env.RAPID_API_HOST!,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ phone_number: sanitizedNumber })
+    }
+
+    try {
+        const response = await fetch(url, options)
+        const result = await response.json() as { status: string }
+
+        if (result.status === 'valid') {
+            console.log(`✅ Validação bem-sucedida para o número: ${sanitizedNumber}`)
+            return true
+        } else {
+            console.warn(`API de validação retornou status '${result.status}' para o número: ${sanitizedNumber}`)
+            return false
+        }
+    } catch (error) {
+        console.error('Erro ao chamar a API de validação de número:', error)
+        return false // Em caso de erro na API, consideramos o número inválido por segurança
+    }
+}
+
 // --- FUNÇÕES DE LÓGICA DOS JOBS ---
 export async function triggerUpcomingRemindersCheck() {
     console.log('Disparando verificação de lembretes próximos (aviso de 5 min)...')
     try {
         const nextAppUrl = process.env.NEXT_APP_URL
         const cronSecret = process.env.CRON_SECRET
-        await fetch(`${nextAppUrl}/api/cron/notify-upcoming-reminders?secret=${cronSecret}`, { method: 'POST' })
+        await fetch(`${nextAppUrl}/api/cron/notificar-proximos-lembretes?secret=${cronSecret}`, { method: 'POST' })
     } catch (error) {
         console.error('Erro de rede ao disparar o gatilho de avisos prévios:', error)
     }
@@ -22,14 +64,30 @@ export async function triggerUpcomingRemindersCheck() {
 export async function sendPersonalReminders() {
     console.log('Verificando lembretes no horário (WhatsApp)...')
     const nowTimestamp = admin.firestore.Timestamp.now()
+
     const snapshot = await db.collection('reminders')
+        // CORREÇÃO SUTIL: Pega apenas lembretes que não são recorrentes E marcados como não enviados.
+        // Lembretes recorrentes não usarão mais o campo 'sent'.
+        .where('recurrence', '==', 'Não repetir')
         .where('sent', '==', false)
         .where('scheduledAt', '<=', nowTimestamp)
         .get()
 
-    if (snapshot.empty) return
+    // Query separada para recorrentes, para simplificar a lógica
+    const recurringSnapshot = await db.collection('reminders')
+        .where('recurrence', 'in', ['Diariamente', 'Semanalmente', 'Mensalmente', 'Anualmente'])
+        .where('scheduledAt', '<=', nowTimestamp)
+        .get()
 
-    for (const doc of snapshot.docs) {
+    if (snapshot.empty && recurringSnapshot.empty) {
+        console.log('Nenhum lembrete para enviar no horário exato.')
+        return
+    }
+
+    const allDocs = [...snapshot.docs, ...recurringSnapshot.docs]
+    console.log(`Encontrados ${allDocs.length} lembretes para processar.`)
+
+    for (const doc of allDocs) {
         const reminder = doc.data() as IReminder
         const phoneNumber = await findUserPhoneNumber(reminder.userId)
 
@@ -39,23 +97,28 @@ export async function sendPersonalReminders() {
             await sendWhatsappMessage(phoneNumber, message)
         }
 
-        if (reminder.recurrence === 'Não repetir') {
+        // --- LÓGICA DE ATUALIZAÇÃO REESTRUTURADA (A CORREÇÃO PRINCIPAL) ---
+        const recurrence = reminder.recurrence || 'Não repetir'
+
+        if (recurrence === 'Não repetir') {
+            // Se não for recorrente, APENAS marca como enviado.
             await doc.ref.update({ sent: true })
             console.log(`Lembrete ${doc.id} marcado como concluído.`)
-            continue
-        }
+        } else {
+            // Se for recorrente, APENAS reagenda para a próxima data.
+            const currentScheduledAt = reminder.scheduledAt.toDate()
+            const nextScheduledAt = new Date(currentScheduledAt)
 
-        const currentScheduledAt = reminder.scheduledAt.toDate()
-        const nextScheduledAt = new Date(currentScheduledAt)
+            switch (recurrence) {
+                case 'Diariamente': nextScheduledAt.setDate(nextScheduledAt.getDate() + 1); break
+                case 'Semanalmente': nextScheduledAt.setDate(nextScheduledAt.getDate() + 7); break
+                case 'Mensalmente': nextScheduledAt.setMonth(nextScheduledAt.getMonth() + 1); break
+                case 'Anualmente': nextScheduledAt.setFullYear(nextScheduledAt.getFullYear() + 1); break
+            }
 
-        switch (reminder.recurrence) {
-            case 'Diariamente': nextScheduledAt.setDate(nextScheduledAt.getDate() + 1); break
-            case 'Semanalmente': nextScheduledAt.setDate(nextScheduledAt.getDate() + 7); break
-            case 'Mensalmente': nextScheduledAt.setMonth(nextScheduledAt.getMonth() + 1); break
-            case 'Anualmente': nextScheduledAt.setFullYear(nextScheduledAt.getFullYear() + 1); break
+            await doc.ref.update({ scheduledAt: admin.firestore.Timestamp.fromDate(nextScheduledAt) })
+            console.log(`Lembrete ${doc.id} reagendado para ${nextScheduledAt.toISOString()}.`)
         }
-        await doc.ref.update({ scheduledAt: admin.firestore.Timestamp.fromDate(nextScheduledAt) })
-        console.log(`Lembrete ${doc.id} reagendado para ${nextScheduledAt.toISOString()}.`)
     }
 }
 
@@ -145,7 +208,7 @@ export async function notifyFreeUsersOfReset() {
         try {
             const nextAppUrl = process.env.NEXT_APP_URL
             const cronSecret = process.env.CRON_SECRET
-            await fetch(`${nextAppUrl}/api/cron/notify-free-users?secret=${cronSecret}`, {
+            await fetch(`${nextAppUrl}/api/cron/notificar-usuarios-gratuitos?secret=${cronSecret}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ userId }),
@@ -168,6 +231,50 @@ async function findUserPhoneNumber(userId: string): Promise<string | undefined> 
     }
 }
 
+// export async function sendWhatsappMessage(number: string, message: string | Buttons) {
+//     const client = getClient()
+//     if (!client || (await client.getState()) !== 'CONNECTED') {
+//         console.warn("Cliente não está conectado. Mensagem não enviada.")
+//         return { success: false, error: 'Cliente WhatsApp não conectado.' }
+//     }
+
+//     // 1. Remove tudo que não for dígito.
+//     let sanitizedNumber = number.replace(/\D/g, '')
+
+//     // 2. Se o número tiver 11 dígitos (DDD + 9xxxxxxxx), adiciona o 55.
+//     if (sanitizedNumber.length === 11) {
+//         sanitizedNumber = `55${sanitizedNumber}`
+//     }
+//     // 3. Se tiver 10 dígitos (DDD + 8xxxxxxx), adiciona 55 e o 9.
+//     else if (sanitizedNumber.length === 10) {
+//         const ddd = sanitizedNumber.substring(0, 2)
+//         const numero = sanitizedNumber.substring(2)
+//         sanitizedNumber = `55${ddd}9${numero}`
+//     }
+//     // Garante que o número final tenha o formato correto do WhatsApp (55 + 11 dígitos)
+//     else if (sanitizedNumber.length !== 13 || !sanitizedNumber.startsWith('55')) {
+//         console.error(`Número de telefone inválido após normalização: ${number}`)
+//         return { success: false, error: 'Número de telefone inválido.' }
+//     }
+
+//     const finalNumber = `${sanitizedNumber}@c.us`
+//     // --- FIM DA CORREÇÃO ---
+
+//     try {
+//         const isRegistered = await client.isRegisteredUser(finalNumber)
+//         if (isRegistered) {
+//             await client.sendMessage(finalNumber, message)
+//             console.log(`✅ Mensagem enviada com sucesso para ${number}`)
+//             return { success: true }
+//         } else {
+//             console.error(`Número ${number} (${finalNumber}) não está registrado no WhatsApp.`)
+//             return { success: false, error: 'Número não registrado no WhatsApp.' }
+//         }
+//     } catch (error) {
+//         console.error(`Erro ao enviar mensagem para ${number}:`, error)
+//         return { success: false, error: 'Falha ao enviar mensagem.' }
+//     }
+// }
 
 export async function sendWhatsappMessage(number: string, message: string | Buttons) {
     const client = getClient()
@@ -176,43 +283,25 @@ export async function sendWhatsappMessage(number: string, message: string | Butt
         return { success: false, error: 'Cliente WhatsApp não conectado.' }
     }
 
-    // --- LÓGICA DE NORMALIZAÇÃO DO NÚMERO (MAIS ROBUSTA) ---
+    // 2. CHAMA A VALIDAÇÃO PRIMEIRO
+    const isValid = await validateWhatsappNumber(number)
+    if (!isValid) {
+        return { success: false, error: `Número ${number} foi considerado inválido pela API.` }
+    }
 
-    // 1. Remove tudo que não for dígito.
+    // A lógica de normalização agora vive dentro do validador, aqui apenas formatamos para a wweb.js
     let sanitizedNumber = number.replace(/\D/g, '')
-
-    // 2. Se o número tiver 11 dígitos (DDD + 9xxxxxxxx), adiciona o 55.
-    if (sanitizedNumber.length === 11) {
+    if (sanitizedNumber.length <= 11) {
         sanitizedNumber = `55${sanitizedNumber}`
     }
-    // 3. Se tiver 10 dígitos (DDD + 8xxxxxxx), adiciona 55 e o 9.
-    else if (sanitizedNumber.length === 10) {
-        const ddd = sanitizedNumber.substring(0, 2)
-        const numero = sanitizedNumber.substring(2)
-        sanitizedNumber = `55${ddd}9${numero}`
-    }
-    // Garante que o número final tenha o formato correto do WhatsApp (55 + 11 dígitos)
-    else if (sanitizedNumber.length !== 13 || !sanitizedNumber.startsWith('55')) {
-        console.error(`Número de telefone inválido após normalização: ${number}`)
-        return { success: false, error: 'Número de telefone inválido.' }
-    }
-
     const finalNumber = `${sanitizedNumber}@c.us`
 
-    // --- FIM DA CORREÇÃO ---
-
     try {
-        const isRegistered = await client.isRegisteredUser(finalNumber)
-        if (isRegistered) {
-            await client.sendMessage(finalNumber, message)
-            console.log(`✅ Mensagem enviada com sucesso para ${number}`)
-            return { success: true }
-        } else {
-            console.error(`Número ${number} (${finalNumber}) não está registrado no WhatsApp.`)
-            return { success: false, error: 'Número não registrado no WhatsApp.' }
-        }
+        await client.sendMessage(finalNumber, message)
+        console.log(`Mensagem enviada com sucesso para ${number}`)
+        return { success: true }
     } catch (error) {
-        console.error(`Erro ao enviar mensagem para ${number}:`, error)
+        console.error(`Erro ao enviar mensagem para ${number} (após validação):`, error)
         return { success: false, error: 'Falha ao enviar mensagem.' }
     }
 }
