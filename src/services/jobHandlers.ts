@@ -7,48 +7,6 @@ import { IReminder } from '../interfaces/IReminder'
 
 const db = getFirebaseFirestore()
 
-// --- NOVA FUNÇÃO DE VALIDAÇÃO ---
-
-/**
- * Valida um número de WhatsApp usando a RapidAPI.
- * @param number O número de telefone a ser validado.
- * @returns {Promise<boolean>} True se o número for válido, false caso contrário.
- */
-async function validateWhatsappNumber(number: string): Promise<boolean> {
-    // Normaliza o número para o formato esperado pela API (com código do país)
-    let sanitizedNumber = number.replace(/\D/g, '')
-    if (sanitizedNumber.length <= 11) {
-        sanitizedNumber = `55${sanitizedNumber}`
-    }
-
-    const url = 'https://whatsapp-number-validator3.p.rapidapi.com/WhatsappNumberHasItWithToken'
-    const options = {
-        method: 'POST',
-        headers: {
-            'x-rapidapi-key': process.env.RAPID_API_KEY!,
-            'x-rapidapi-host': process.env.RAPID_API_HOST!,
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ phone_number: sanitizedNumber })
-    }
-
-    try {
-        const response = await fetch(url, options)
-        const result = await response.json() as { status: string }
-
-        if (result.status === 'valid') {
-            console.log(`✅ Validação bem-sucedida para o número: ${sanitizedNumber}`)
-            return true
-        } else {
-            console.warn(`API de validação retornou status '${result.status}' para o número: ${sanitizedNumber}`)
-            return false
-        }
-    } catch (error) {
-        console.error('Erro ao chamar a API de validação de número:', error)
-        return false // Em caso de erro na API, consideramos o número inválido por segurança
-    }
-}
-
 // --- FUNÇÕES DE LÓGICA DOS JOBS ---
 export async function triggerUpcomingRemindersCheck() {
     console.log('Disparando verificação de lembretes próximos (aviso de 5 min)...')
@@ -231,51 +189,6 @@ async function findUserPhoneNumber(userId: string): Promise<string | undefined> 
     }
 }
 
-// export async function sendWhatsappMessage(number: string, message: string | Buttons) {
-//     const client = getClient()
-//     if (!client || (await client.getState()) !== 'CONNECTED') {
-//         console.warn("Cliente não está conectado. Mensagem não enviada.")
-//         return { success: false, error: 'Cliente WhatsApp não conectado.' }
-//     }
-
-//     // 1. Remove tudo que não for dígito.
-//     let sanitizedNumber = number.replace(/\D/g, '')
-
-//     // 2. Se o número tiver 11 dígitos (DDD + 9xxxxxxxx), adiciona o 55.
-//     if (sanitizedNumber.length === 11) {
-//         sanitizedNumber = `55${sanitizedNumber}`
-//     }
-//     // 3. Se tiver 10 dígitos (DDD + 8xxxxxxx), adiciona 55 e o 9.
-//     else if (sanitizedNumber.length === 10) {
-//         const ddd = sanitizedNumber.substring(0, 2)
-//         const numero = sanitizedNumber.substring(2)
-//         sanitizedNumber = `55${ddd}9${numero}`
-//     }
-//     // Garante que o número final tenha o formato correto do WhatsApp (55 + 11 dígitos)
-//     else if (sanitizedNumber.length !== 13 || !sanitizedNumber.startsWith('55')) {
-//         console.error(`Número de telefone inválido após normalização: ${number}`)
-//         return { success: false, error: 'Número de telefone inválido.' }
-//     }
-
-//     const finalNumber = `${sanitizedNumber}@c.us`
-//     // --- FIM DA CORREÇÃO ---
-
-//     try {
-//         const isRegistered = await client.isRegisteredUser(finalNumber)
-//         if (isRegistered) {
-//             await client.sendMessage(finalNumber, message)
-//             console.log(`✅ Mensagem enviada com sucesso para ${number}`)
-//             return { success: true }
-//         } else {
-//             console.error(`Número ${number} (${finalNumber}) não está registrado no WhatsApp.`)
-//             return { success: false, error: 'Número não registrado no WhatsApp.' }
-//         }
-//     } catch (error) {
-//         console.error(`Erro ao enviar mensagem para ${number}:`, error)
-//         return { success: false, error: 'Falha ao enviar mensagem.' }
-//     }
-// }
-
 export async function sendWhatsappMessage(number: string, message: string | Buttons) {
     const client = getClient()
     if (!client || (await client.getState()) !== 'CONNECTED') {
@@ -283,25 +196,35 @@ export async function sendWhatsappMessage(number: string, message: string | Butt
         return { success: false, error: 'Cliente WhatsApp não conectado.' }
     }
 
-    // 2. CHAMA A VALIDAÇÃO PRIMEIRO
-    const isValid = await validateWhatsappNumber(number)
-    if (!isValid) {
-        return { success: false, error: `Número ${number} foi considerado inválido pela API.` }
-    }
+    // --- CORREÇÃO DA FORMATAÇÃO DO NÚMERO ---
 
-    // A lógica de normalização agora vive dentro do validador, aqui apenas formatamos para a wweb.js
+    // 1. Limpa tudo que não for dígito.
     let sanitizedNumber = number.replace(/\D/g, '')
+
+    // 2. Garante que o número tenha o código do país (55).
+    // Se o número começar com '55' e tiver mais de 11 dígitos (55 + DDD + numero), está ok.
+    // Se não, assume que falta o 55 e o adiciona.
     if (sanitizedNumber.length <= 11) {
         sanitizedNumber = `55${sanitizedNumber}`
     }
+
+    // 3. Adiciona o sufixo do WhatsApp.
     const finalNumber = `${sanitizedNumber}@c.us`
 
+    // --- FIM DA CORREÇÃO ---
+
     try {
-        await client.sendMessage(finalNumber, message)
-        console.log(`Mensagem enviada com sucesso para ${number}`)
+        // A biblioteca também tem um método 'getNumberId' que é mais robusto para verificar.
+        const chat = await client.getChatById(finalNumber)
+        if (!chat) {
+            throw new Error(`Chat não encontrado para o número ${finalNumber}`)
+        }
+
+        await chat.sendMessage(message)
+        console.log(`Mensagem enviada para ${number}`)
         return { success: true }
     } catch (error) {
-        console.error(`Erro ao enviar mensagem para ${number} (após validação):`, error)
+        console.error(`Erro ao enviar mensagem para ${number}:`, error)
         return { success: false, error: 'Falha ao enviar mensagem.' }
     }
 }
