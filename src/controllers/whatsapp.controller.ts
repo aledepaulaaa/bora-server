@@ -1,6 +1,6 @@
 //melembra-server/src/controllers/whatsapp.controllers.ts
 import { Request, Response } from 'express'
-import * as whatsappService from '../services/whatsapp.service'
+import { sendWhatsappMessage } from '../services/jobHandlers'
 
 export const sendMessageController = async (req: Request, res: Response) => {
     const { number, message } = req.body
@@ -10,11 +10,11 @@ export const sendMessageController = async (req: Request, res: Response) => {
     }
 
     try {
-        const result = await whatsappService.sendWhatsappMessage(number, message)
-        if (result.success) {
+        const result = await sendWhatsappMessage(number, message)
+        if (result && result.success) {
             res.status(200).send({ message: `Mensagem enviada para ${number}` })
         } else {
-            res.status(500).send({ error: result.error })
+            res.status(500).send({ error: result?.error || 'Falha ao enviar mensagem.' })
         }
     } catch (error) {
         console.error('Erro no controlador ao enviar mensagem:', error)
