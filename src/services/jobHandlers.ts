@@ -168,28 +168,6 @@ async function findUserPhoneNumber(userId: string): Promise<string | undefined> 
     }
 }
 
-/**
- * Gera diferentes formatos de número de telefone para aumentar a chance de sucesso.
- */
-function generateNumberVariants(number: string): string[] {
-    const digits = number.replace(/\D/g, '')
-    const variants = new Set<string>()
-
-    // 1. Número como está (sem 55)
-    if (digits.length >= 10 && digits.length <= 11) {
-        variants.add(digits)
-    }
-    // 2. Número com 55
-    if (digits.length >= 10 && digits.length <= 11) {
-        variants.add(`55${digits}`)
-    }
-    // 3. Se o número original já tinha 55, tenta sem ele
-    if (digits.startsWith('55') && digits.length > 11) {
-        variants.add(digits.substring(2))
-    }
-
-    return Array.from(variants)
-}
 
 export async function sendWhatsappMessage(number: string, message: string | Buttons) {
     const client = getClient()
@@ -198,32 +176,43 @@ export async function sendWhatsappMessage(number: string, message: string | Butt
         return { success: false, error: 'Cliente WhatsApp não conectado.' }
     }
 
-    // --- NOVA LÓGICA DE TENTATIVAS ---
-    const variants = generateNumberVariants(number)
-    if (variants.length === 0) {
-        console.error(`Número inválido fornecido: ${number}`)
+    // --- LÓGICA DE NORMALIZAÇÃO DO NÚMERO (MAIS ROBUSTA) ---
+
+    // 1. Remove tudo que não for dígito.
+    let sanitizedNumber = number.replace(/\D/g, '')
+
+    // 2. Se o número tiver 11 dígitos (DDD + 9xxxxxxxx), adiciona o 55.
+    if (sanitizedNumber.length === 11) {
+        sanitizedNumber = `55${sanitizedNumber}`
+    }
+    // 3. Se tiver 10 dígitos (DDD + 8xxxxxxx), adiciona 55 e o 9.
+    else if (sanitizedNumber.length === 10) {
+        const ddd = sanitizedNumber.substring(0, 2)
+        const numero = sanitizedNumber.substring(2)
+        sanitizedNumber = `55${ddd}9${numero}`
+    }
+    // Garante que o número final tenha o formato correto do WhatsApp (55 + 11 dígitos)
+    else if (sanitizedNumber.length !== 13 || !sanitizedNumber.startsWith('55')) {
+        console.error(`Número de telefone inválido após normalização: ${number}`)
         return { success: false, error: 'Número de telefone inválido.' }
     }
 
-    console.log(`Tentando enviar para ${number}, variantes: [${variants.join(', ')}]`)
+    const finalNumber = `${sanitizedNumber}@c.us`
 
-    for (const variant of variants) {
-        try {
-            const chatId = `${variant}@c.us`
-            // Tenta verificar se o chat existe antes de enviar
-            const isRegistered = await client.isRegisteredUser(chatId)
-            if (isRegistered) {
-                await client.sendMessage(chatId, message)
-                console.log(`✅ Mensagem enviada com sucesso para a variante ${variant}`)
-                return { success: true }
-            }
-        } catch (error) {
-            console.warn(`Falha ao enviar para a variante ${variant}:`, error)
-            // Continua para a próxima variante
+    // --- FIM DA CORREÇÃO ---
+
+    try {
+        const isRegistered = await client.isRegisteredUser(finalNumber)
+        if (isRegistered) {
+            await client.sendMessage(finalNumber, message)
+            console.log(`✅ Mensagem enviada com sucesso para ${number}`)
+            return { success: true }
+        } else {
+            console.error(`Número ${number} (${finalNumber}) não está registrado no WhatsApp.`)
+            return { success: false, error: 'Número não registrado no WhatsApp.' }
         }
+    } catch (error) {
+        console.error(`Erro ao enviar mensagem para ${number}:`, error)
+        return { success: false, error: 'Falha ao enviar mensagem.' }
     }
-
-    // Se o loop terminar sem sucesso
-    console.error(`Falha ao enviar mensagem para todas as variantes do número ${number}`)
-    return { success: false, error: 'Falha ao enviar mensagem para todas as variantes testadas.' }
 }
