@@ -89,7 +89,9 @@ export async function sendDailyTips() {
         const hour = new Date().getHours()
         const name = userDoc.data()?.name?.split(' ')[0] || 'Ei'
 
+        if (hour === 8) tipMessage = `Bom dia, ${name} ☀️ Bora começar o dia criando seus lembretes importantes?`
         if (hour === 12) tipMessage = `Ei, ${name} hora do almoço! 🍽️ Quer criar um lembrete para não esquecer daquela pausa?`
+        if (hour === 16) tipMessage = `Boa tarde, ${name} hora do café da tarde! ☕ Quer criar um lembrete enquanto faz aquela pausa?`
         if (hour === 18) tipMessage = `Final do dia, ${name}! Que tal agendar os lembretes importantes de amanhã?`
         if (hour === 21) tipMessage = `Hora de relaxar, ${name}! 😴 Tem algo para anotar e não esquecer amanhã?`
 
@@ -137,32 +139,44 @@ export async function sendDailyList() {
 }
 
 export async function notifyFreeUsersOfReset() {
-    console.log('Verificando usuários gratuitos para notificar sobre o reset da cota...')
-    const today = new Date()
-    const yesterdayStart = admin.firestore.Timestamp.fromDate(new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1))
-    const yesterdayEnd = admin.firestore.Timestamp.fromDate(new Date(today.getFullYear(), today.getMonth(), today.getDate()))
+    console.log('--- 🔄 EXECUTANDO JOB DE NOTIFICAÇÃO DE RESET DE COTA ---')
 
-    const usersWhoUsedQuota = await db.collection('users')
-        .where('lastFreeReminderAt', '>=', yesterdayStart)
-        .where('lastFreeReminderAt', '<', yesterdayEnd)
+    // Pega o timestamp de 24 horas atrás
+    const twentyFourHoursAgo = admin.firestore.Timestamp.fromMillis(Date.now() - 24 * 60 * 60 * 1000)
+
+    // Query: Pega usuários que usaram a cota há mais de 24h E que ainda não foram notificados.
+    const usersToNotify = await db.collection('users')
+        .where('lastFreeReminderAt', '<=', twentyFourHoursAgo)
+        .where('resetNotificationSent', '!=', true) // Chave da lógica!
         .get()
 
-    if (usersWhoUsedQuota.empty) return
+    if (usersToNotify.empty) {
+        console.log('🔄 Nenhum usuário para notificar sobre o reset agora.')
+        return
+    }
 
-    for (const userDoc of usersWhoUsedQuota.docs) {
+    console.log(`🔄 Encontrados ${usersToNotify.docs.length} usuários para notificar sobre o reset.`)
+
+    for (const userDoc of usersToNotify.docs) {
         const userId = userDoc.id
         const subscriptionDoc = await db.collection('subscriptions').doc(userId).get()
 
-        if (subscriptionDoc.exists && subscriptionDoc.data()?.status === 'active') continue
+        if (subscriptionDoc.exists && subscriptionDoc.data()?.status === 'active') {
+            // Se o usuário virou Plus, apenas marca como notificado para não verificar de novo.
+            await userDoc.ref.update({ resetNotificationSent: true })
+            continue
+        }
 
         const userName = userDoc.data()?.name?.split(' ')[0] || 'pessoinha'
-        const message = `Oi, ${userName}! ✨ Seu lembrete diário gratuito no Me Lembra já está disponível novamente. Toque para criar!`
+        const message = `Oi, ${userName}! ✨ Seu lembrete diário gratuito no Me Lembra já está disponível novamente. Vamos criar um?`
 
+        // Envia notificação por WhatsApp
         const phoneNumber = userDoc.data()?.whatsappNumber
         if (phoneNumber) {
             await sendWhatsappMessage(phoneNumber, message)
         }
 
+        // Dispara a notificação Push via API do Next.js
         try {
             const nextAppUrl = process.env.NEXT_APP_URL
             const cronSecret = process.env.CRON_SECRET
@@ -171,9 +185,13 @@ export async function notifyFreeUsersOfReset() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ userId }),
             })
+            console.log(`🔄 Gatilho de push de reset enviado para ${userId}`)
         } catch (error) {
-            console.error(`Erro ao disparar gatilho de push para o usuário ${userId}:`, error)
+            console.error(`❌ Erro ao disparar gatilho de push para ${userId}:`, error)
         }
+
+        // Marca o usuário como notificado para não enviar de novo até o próximo uso.
+        await userDoc.ref.update({ resetNotificationSent: true })
     }
 }
 
@@ -192,39 +210,43 @@ async function findUserPhoneNumber(userId: string): Promise<string | undefined> 
 export async function sendWhatsappMessage(number: string, message: string | Buttons) {
     const client = getClient()
     if (!client || (await client.getState()) !== 'CONNECTED') {
-        console.warn("Cliente não está conectado. Mensagem não enviada.")
+        console.warn("Cliente não conectado. Mensagem não enviada.")
         return { success: false, error: 'Cliente WhatsApp não conectado.' }
     }
 
-    // --- CORREÇÃO DA FORMATAÇÃO DO NÚMERO ---
-
     // 1. Limpa tudo que não for dígito.
-    let sanitizedNumber = number.replace(/\D/g, '')
+    const cleanNumber = number.replace(/\D/g, '')
 
-    // 2. Garante que o número tenha o código do país (55).
-    // Se o número começar com '55' e tiver mais de 11 dígitos (55 + DDD + numero), está ok.
-    // Se não, assume que falta o 55 e o adiciona.
-    if (sanitizedNumber.length <= 11) {
-        sanitizedNumber = `55${sanitizedNumber}`
+    // 2. Extrai DDD e número base usando Regex, de forma muito mais robusta.
+    // Isso captura (DDD de 2 dígitos) + (Número de 8 ou 9 dígitos) do final da string.
+    const match = cleanNumber.match(/(\d{2})(\d{8,9})$/)
+    if (!match) {
+        console.error(`Número em formato irreconhecível: ${number}`)
+        return { success: false, error: 'Número em formato irreconhecível.' }
     }
+    const [, ddd, baseNumber] = match
 
-    // 3. Adiciona o sufixo do WhatsApp.
-    const finalNumber = `${sanitizedNumber}@c.us`
+    // 3. Monta as variações com o código do país.
+    const numberWith9 = `55${ddd}${baseNumber.length === 9 ? baseNumber : `9${baseNumber}`}@c.us`
+    const numberWithout9 = `55${ddd}${baseNumber.length === 8 ? baseNumber : baseNumber.slice(1)}@c.us`
 
-    // --- FIM DA CORREÇÃO ---
-
+    // Tenta enviar para a primeira variação (a mais provável)
     try {
-        // A biblioteca também tem um método 'getNumberId' que é mais robusto para verificar.
-        const chat = await client.getChatById(finalNumber)
-        if (!chat) {
-            throw new Error(`Chat não encontrado para o número ${finalNumber}`)
-        }
-
-        await chat.sendMessage(message)
-        console.log(`Mensagem enviada para ${number}`)
+        console.log(`Tentando enviar para ${numberWith9}...`)
+        await client.sendMessage(numberWith9, message)
+        console.log(`✅ Mensagem enviada para ${number} (usando variação 1).`)
         return { success: true }
-    } catch (error) {
-        console.error(`Erro ao enviar mensagem para ${number}:`, error)
-        return { success: false, error: 'Falha ao enviar mensagem.' }
+    } catch (error: any) {
+        console.warn(`⚠️ Falha na 1ª tentativa para ${numberWith9}. Tentando variação 2...`)
+
+        // Se a primeira falhar, tenta a segunda
+        try {
+            await client.sendMessage(numberWithout9, message)
+            console.log(`✅ Mensagem enviada para ${number} (usando variação 2).`)
+            return { success: true }
+        } catch (secondError: any) {
+            console.error(`❌ Erro final ao enviar para ${number} após duas tentativas.`, secondError.message)
+            return { success: false, error: 'Número de WhatsApp inválido após duas tentativas.' }
+        }
     }
 }

@@ -9,6 +9,7 @@ import {
     sendDailyList,
     sendDailyTips
 } from './jobHandlers'
+// import { sendAdminTestReminder } from './jobTestHandler'
 
 // Array para manter o controle de todas as tarefas agendadas
 const scheduledTasks: ScheduledTask[] = []
@@ -31,9 +32,12 @@ export function startCronJobs() {
 
     // Roda todo dia às 8h para enviar a lista de lembretes do dia
     scheduledTasks.push(cron.schedule('0 8 * * *', sendDailyList))
-    
+
     // Roda às 12h, 18h e 21h para enviar dicas interativas
     scheduledTasks.push(cron.schedule('0 12,18,21 * * *', sendDailyTips))
+
+    // console.log("!!! AGENDANDO JOB DE TESTE DE ADMIN PARA RODAR A CADA MINUTO !!!")
+    // scheduledTasks.push(cron.schedule('* * * * *', sendAdminTestReminder))
 
     console.log('✅ Cron jobs agendados com sucesso!')
 }
