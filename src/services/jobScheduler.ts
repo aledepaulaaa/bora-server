@@ -25,7 +25,9 @@ export function startCronJobs() {
     scheduledTasks.push(cron.schedule('*/2 * * * *', triggerUpcomingRemindersCheck))
 
     // Roda a cada 5 minutos para enviar lembretes no horário
-    scheduledTasks.push(cron.schedule('*/5 * * * *', sendPersonalReminders))
+    scheduledTasks.push(cron.schedule('*/2 * * * *', sendPersonalReminders))
+    // console.log("!!! MODO DE TESTE ATIVADO: Verificando lembretes a cada minuto. !!!")
+    // scheduledTasks.push(cron.schedule('* * * * *', sendPersonalReminders))
 
     // Roda todo dia às 7h para notificar usuários do plano gratuito
     scheduledTasks.push(cron.schedule('0 7 * * *', notifyFreeUsersOfReset))

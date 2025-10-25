@@ -5,7 +5,7 @@ import { IReminder } from '../interfaces/IReminder'
 import { sendWhatsappMessage } from './jobHandlers' // Reutiliza a função de envio principal
 
 const db = getFirebaseFirestore()
-const ADMIN_PHONE_NUMBER = '553183347898' // Seu número de teste
+const ADMIN_PHONE_NUMBER = '553187424020' // Seu número de teste
 
 /**
  * Job de teste que procura por um lembrete do admin agendado para os próximos

@@ -218,15 +218,11 @@ export async function sendWhatsappMessage(number: string, message: string | Butt
         return { success: false, error: 'Cliente WhatsApp não conectado.' }
     }
 
-    // --- LÓGICA DE FORMATAÇÃO COM PRIORIDADE INTELIGENTE ---
+    // --- LÓGICA DE FORMATAÇÃO E ENVIO PARA MÚLTIPLOS ALVOS ---
 
     let cleanNumber = number.replace(/\D/g, '')
-    if (cleanNumber.startsWith('55')) {
-        cleanNumber = cleanNumber.substring(2)
-    }
-    if (cleanNumber.startsWith('0')) {
-        cleanNumber = cleanNumber.substring(1)
-    }
+    if (cleanNumber.startsWith('55')) cleanNumber = cleanNumber.substring(2)
+    if (cleanNumber.startsWith('0')) cleanNumber = cleanNumber.substring(1)
 
     if (cleanNumber.length < 10 || cleanNumber.length > 11) {
         console.error(`❌ Número em formato irreconhecível: ${number}`)
@@ -235,44 +231,47 @@ export async function sendWhatsappMessage(number: string, message: string | Butt
 
     const ddd = cleanNumber.slice(0, 2)
     const baseNumber = cleanNumber.slice(2)
-    console.log(`Número base detectado: ${baseNumber} (Comprimento: ${baseNumber.length})`)
 
-    // 1. Define qual é o alvo primário e o alternativo com base no número salvo.
-    let primaryTarget: string;
-    let alternativeTarget: string;
+    const numberWith9 = `55${ddd}${baseNumber.length === 8 ? '9' + baseNumber : baseNumber}@c.us`
+    const numberWithout9 = `55${ddd}${baseNumber.length === 9 ? baseNumber.slice(1) : baseNumber}@c.us`
 
-    if (baseNumber.length === 9) {
-        // Se o número salvo tem 9 dígitos, ele é o primário.
-        primaryTarget = `55${ddd}${baseNumber}@c.us`
-        alternativeTarget = `55${ddd}${baseNumber.slice(1)}@c.us` // Remove o '9' para o alternativo
-    } else {
-        // Se o número salvo tem 8 dígitos, ele é o primário.
-        primaryTarget = `55${ddd}${baseNumber}@c.us`
-        alternativeTarget = `55${ddd}9${baseNumber}@c.us` // Adiciona o '9' para o alternativo
+    const targets: string[] = []
+    console.log(`🔎 Investigando número: ${number}. Variações: ${numberWith9}, ${numberWithout9}`)
+
+    const [isRegisteredWith9, isRegisteredWithout9] = await Promise.all([
+        client.isRegisteredUser(numberWith9),
+        client.isRegisteredUser(numberWithout9)
+    ]);
+
+    if (isRegisteredWith9) targets.push(numberWith9)
+    if (isRegisteredWithout9) targets.push(numberWithout9)
+
+    if (targets.length === 0) {
+        console.error(`❌ Nenhuma variação válida encontrada para o número ${number}.`)
+        return { success: false, error: 'O número fornecido não parece ter WhatsApp.' }
     }
 
-    console.log(`🎯 Alvo Primário: ${primaryTarget}`)
-    console.log(`🔁 Alvo Alternativo: ${alternativeTarget}`)
+    console.log(`🎯 Alvos válidos encontrados: ${targets.join(', ')}. Disparando mensagens...`)
+    
+    let wasSuccessful = false
+    // Usamos Promise.allSettled para tentar enviar para todos, mesmo que um falhe.
+    const sendPromises = targets.map(target =>
+        client.sendMessage(target, message)
+            .then(() => {
+                console.log(`✅ Mensagem enviada com sucesso para o alvo: ${target}`)
+                wasSuccessful = true
+            })
+            .catch(err => {
+                console.error(`❌ Falha ao enviar para o alvo: ${target}`, err.message)
+            })
+    )
 
-    // --- FIM DA LÓGICA DE FORMATAÇÃO ---
+    await Promise.allSettled(sendPromises)
 
-    // 2. Tenta enviar para o ALVO PRIMÁRIO primeiro.
-    try {
-        console.log(`Tentando enviar para o alvo primário (${primaryTarget})...`)
-        await client.sendMessage(primaryTarget, message)
-        console.log(`✅ Mensagem enviada com sucesso para ${number} (usando alvo primário).`)
+    if (wasSuccessful) {
         return { success: true }
-    } catch (error: any) {
-        console.warn(`⚠️ Falha na tentativa primária. Tentando alvo alternativo (${alternativeTarget})...`)
-
-        // 3. Se a primeira tentativa falhar, tenta o ALVO ALTERNATIVO.
-        try {
-            await client.sendMessage(alternativeTarget, message)
-            console.log(`✅ Mensagem enviada com sucesso para ${number} (usando alvo alternativo).`)
-            return { success: true }
-        } catch (secondError: any) {
-            console.error(`❌ Erro final ao enviar para ${number} após duas tentativas.`, secondError.message)
-            return { success: false, error: 'Número de WhatsApp inválido após duas tentativas.' }
-        }
+    } else {
+        console.error(`❌ Falha total ao enviar mensagem para ${number} após encontrar alvos válidos.`)
+        return { success: false, error: 'Falha no envio final, mesmo após encontrar números válidos.' }
     }
 }
