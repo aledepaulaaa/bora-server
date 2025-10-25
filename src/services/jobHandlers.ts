@@ -20,50 +20,54 @@ export async function triggerUpcomingRemindersCheck() {
 }
 
 export async function sendPersonalReminders() {
-    console.log('Verificando lembretes no horário (WhatsApp)...')
+    console.log('--- ⏰ INICIANDO JOB: Verificando lembretes no horário (WhatsApp)... ---')
     const nowTimestamp = admin.firestore.Timestamp.now()
 
     const snapshot = await db.collection('reminders')
-        // CORREÇÃO SUTIL: Pega apenas lembretes que não são recorrentes E marcados como não enviados.
-        // Lembretes recorrentes não usarão mais o campo 'sent'.
         .where('recurrence', '==', 'Não repetir')
         .where('sent', '==', false)
         .where('scheduledAt', '<=', nowTimestamp)
         .get()
 
-    // Query separada para recorrentes, para simplificar a lógica
     const recurringSnapshot = await db.collection('reminders')
         .where('recurrence', 'in', ['Diariamente', 'Semanalmente', 'Mensalmente', 'Anualmente'])
         .where('scheduledAt', '<=', nowTimestamp)
         .get()
 
     if (snapshot.empty && recurringSnapshot.empty) {
-        console.log('Nenhum lembrete para enviar no horário exato.')
+        console.log('⏰ Nenhum lembrete encontrado no intervalo de tempo atual.')
         return
     }
 
     const allDocs = [...snapshot.docs, ...recurringSnapshot.docs]
-    console.log(`Encontrados ${allDocs.length} lembretes para processar.`)
+    console.log(`⏰ Encontrados ${allDocs.length} lembretes pendentes. Processando...`)
 
     for (const doc of allDocs) {
         const reminder = doc.data() as IReminder
+        console.log(`\n--- Processando Lembrete ID: ${doc.id} ---`)
+        console.log(`   - Título: "${reminder.title}"`)
+        console.log(`   - Para Usuário ID: ${reminder.userId}`)
+
+        // --- LOG DETALHADO DA BUSCA DO NÚMERO ---
         const phoneNumber = await findUserPhoneNumber(reminder.userId)
 
         if (phoneNumber) {
+            console.log(`   - ✅ Número de telefone encontrado: ${phoneNumber}`)
             const time = reminder.scheduledAt.toDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
             const message = `Melembra veio te lembrar: "${reminder.title}" começa às ${time}!`
+
+            console.log(`   - 💬 Preparando para enviar a mensagem: "${message}"`)
             await sendWhatsappMessage(phoneNumber, message)
-        }
-
-        // --- LÓGICA DE ATUALIZAÇÃO REESTRUTURADA (A CORREÇÃO PRINCIPAL) ---
-        const recurrence = reminder.recurrence || 'Não repetir'
-
-        if (recurrence === 'Não repetir') {
-            // Se não for recorrente, APENAS marca como enviado.
-            await doc.ref.update({ sent: true })
-            console.log(`Lembrete ${doc.id} marcado como concluído.`)
         } else {
-            // Se for recorrente, APENAS reagenda para a próxima data.
+            console.log(`   - ⚠️ Número de telefone NÃO encontrado para o usuário ${reminder.userId}. Lembrete não pode ser enviado.`)
+        }
+        // --- FIM DO LOG DETALHADO ---
+
+        const recurrence = reminder.recurrence || 'Não repetir'
+        if (recurrence === 'Não repetir') {
+            await doc.ref.update({ sent: true })
+            console.log(`   - 🏁 Lembrete ${doc.id} marcado como concluído.`)
+        } else {
             const currentScheduledAt = reminder.scheduledAt.toDate()
             const nextScheduledAt = new Date(currentScheduledAt)
 
@@ -75,7 +79,7 @@ export async function sendPersonalReminders() {
             }
 
             await doc.ref.update({ scheduledAt: admin.firestore.Timestamp.fromDate(nextScheduledAt) })
-            console.log(`Lembrete ${doc.id} reagendado para ${nextScheduledAt.toISOString()}.`)
+            console.log(`   - 🔄 Lembrete ${doc.id} reagendado para ${nextScheduledAt.toISOString()}.`)
         }
     }
 }
@@ -210,39 +214,61 @@ async function findUserPhoneNumber(userId: string): Promise<string | undefined> 
 export async function sendWhatsappMessage(number: string, message: string | Buttons) {
     const client = getClient()
     if (!client || (await client.getState()) !== 'CONNECTED') {
-        console.warn("Cliente não conectado. Mensagem não enviada.")
+        console.warn("Cliente não está conectado. Mensagem não enviada.")
         return { success: false, error: 'Cliente WhatsApp não conectado.' }
     }
 
-    // 1. Limpa tudo que não for dígito.
-    const cleanNumber = number.replace(/\D/g, '')
+    // --- LÓGICA DE FORMATAÇÃO COM PRIORIDADE INTELIGENTE ---
 
-    // 2. Extrai DDD e número base usando Regex, de forma muito mais robusta.
-    // Isso captura (DDD de 2 dígitos) + (Número de 8 ou 9 dígitos) do final da string.
-    const match = cleanNumber.match(/(\d{2})(\d{8,9})$/)
-    if (!match) {
-        console.error(`Número em formato irreconhecível: ${number}`)
-        return { success: false, error: 'Número em formato irreconhecível.' }
+    let cleanNumber = number.replace(/\D/g, '')
+    if (cleanNumber.startsWith('55')) {
+        cleanNumber = cleanNumber.substring(2)
     }
-    const [, ddd, baseNumber] = match
+    if (cleanNumber.startsWith('0')) {
+        cleanNumber = cleanNumber.substring(1)
+    }
 
-    // 3. Monta as variações com o código do país.
-    const numberWith9 = `55${ddd}${baseNumber.length === 9 ? baseNumber : `9${baseNumber}`}@c.us`
-    const numberWithout9 = `55${ddd}${baseNumber.length === 8 ? baseNumber : baseNumber.slice(1)}@c.us`
+    if (cleanNumber.length < 10 || cleanNumber.length > 11) {
+        console.error(`❌ Número em formato irreconhecível: ${number}`)
+        return { success: false, error: 'Número em formato inválido.' }
+    }
 
-    // Tenta enviar para a primeira variação (a mais provável)
+    const ddd = cleanNumber.slice(0, 2)
+    const baseNumber = cleanNumber.slice(2)
+    console.log(`Número base detectado: ${baseNumber} (Comprimento: ${baseNumber.length})`)
+
+    // 1. Define qual é o alvo primário e o alternativo com base no número salvo.
+    let primaryTarget: string;
+    let alternativeTarget: string;
+
+    if (baseNumber.length === 9) {
+        // Se o número salvo tem 9 dígitos, ele é o primário.
+        primaryTarget = `55${ddd}${baseNumber}@c.us`
+        alternativeTarget = `55${ddd}${baseNumber.slice(1)}@c.us` // Remove o '9' para o alternativo
+    } else {
+        // Se o número salvo tem 8 dígitos, ele é o primário.
+        primaryTarget = `55${ddd}${baseNumber}@c.us`
+        alternativeTarget = `55${ddd}9${baseNumber}@c.us` // Adiciona o '9' para o alternativo
+    }
+
+    console.log(`🎯 Alvo Primário: ${primaryTarget}`)
+    console.log(`🔁 Alvo Alternativo: ${alternativeTarget}`)
+
+    // --- FIM DA LÓGICA DE FORMATAÇÃO ---
+
+    // 2. Tenta enviar para o ALVO PRIMÁRIO primeiro.
     try {
-        console.log(`Tentando enviar para ${numberWith9}...`)
-        await client.sendMessage(numberWith9, message)
-        console.log(`✅ Mensagem enviada para ${number} (usando variação 1).`)
+        console.log(`Tentando enviar para o alvo primário (${primaryTarget})...`)
+        await client.sendMessage(primaryTarget, message)
+        console.log(`✅ Mensagem enviada com sucesso para ${number} (usando alvo primário).`)
         return { success: true }
     } catch (error: any) {
-        console.warn(`⚠️ Falha na 1ª tentativa para ${numberWith9}. Tentando variação 2...`)
+        console.warn(`⚠️ Falha na tentativa primária. Tentando alvo alternativo (${alternativeTarget})...`)
 
-        // Se a primeira falhar, tenta a segunda
+        // 3. Se a primeira tentativa falhar, tenta o ALVO ALTERNATIVO.
         try {
-            await client.sendMessage(numberWithout9, message)
-            console.log(`✅ Mensagem enviada para ${number} (usando variação 2).`)
+            await client.sendMessage(alternativeTarget, message)
+            console.log(`✅ Mensagem enviada com sucesso para ${number} (usando alvo alternativo).`)
             return { success: true }
         } catch (secondError: any) {
             console.error(`❌ Erro final ao enviar para ${number} após duas tentativas.`, secondError.message)
