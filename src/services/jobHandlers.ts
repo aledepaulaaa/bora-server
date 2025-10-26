@@ -21,7 +21,12 @@ export async function triggerUpcomingRemindersCheck() {
 
 export async function sendPersonalReminders() {
     console.log('--- ⏰ INICIANDO JOB: Verificando lembretes no horário (WhatsApp)... ---')
-    const nowTimestamp = admin.firestore.Timestamp.now()
+    const now = new Date()
+    const nowTimestamp = admin.firestore.Timestamp.fromDate(now)
+
+    // --- LOGS DE DEPURAÇÃO DE TEMPO ---
+    console.log(`   - Hora atual do servidor (ISO/UTC): ${now.toISOString()}`)
+    console.log(`   - Timestamp usado na query: ${nowTimestamp.toDate().toISOString()}`)
 
     const snapshot = await db.collection('reminders')
         .where('recurrence', '==', 'Não repetir')
@@ -35,7 +40,7 @@ export async function sendPersonalReminders() {
         .get()
 
     if (snapshot.empty && recurringSnapshot.empty) {
-        console.log('⏰ Nenhum lembrete encontrado no intervalo de tempo atual.')
+        console.log(`⏰ Nenhum lembrete encontrado para antes de ${now.toLocaleTimeString('pt-BR')}. Verificação concluída.`)
         return
     }
 
@@ -44,7 +49,10 @@ export async function sendPersonalReminders() {
 
     for (const doc of allDocs) {
         const reminder = doc.data() as IReminder
+        const scheduledAtDate = reminder.scheduledAt.toDate()
+
         console.log(`\n--- Processando Lembrete ID: ${doc.id} ---`)
+        console.log(`   - Horário agendado (ISO/UTC): ${scheduledAtDate.toISOString()}`)
         console.log(`   - Título: "${reminder.title}"`)
         console.log(`   - Para Usuário ID: ${reminder.userId}`)
 
@@ -252,7 +260,7 @@ export async function sendWhatsappMessage(number: string, message: string | Butt
     }
 
     console.log(`🎯 Alvos válidos encontrados: ${targets.join(', ')}. Disparando mensagens...`)
-    
+
     let wasSuccessful = false
     // Usamos Promise.allSettled para tentar enviar para todos, mesmo que um falhe.
     const sendPromises = targets.map(target =>
