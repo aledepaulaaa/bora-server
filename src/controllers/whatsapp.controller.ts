@@ -1,4 +1,4 @@
-//melembra-server/src/controllers/whatsapp.controllers.ts
+//bora-server/src/controllers/whatsapp.controllers.ts
 import { Request, Response } from 'express'
 import { sendWhatsappMessage } from '../services/jobHandlers'
 

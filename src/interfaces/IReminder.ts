@@ -1,4 +1,4 @@
-//melembra-server/src/interfaces/IReminder.ts
+//bora-server/src/interfaces/IReminder.ts
 import { Timestamp } from "firebase-admin/firestore"
 
 export interface IReminder {

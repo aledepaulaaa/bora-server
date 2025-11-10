@@ -1,4 +1,4 @@
-//melembra-server/src/routes/whatsapp.routes.ts
+//bora-server/src/routes/whatsapp.routes.ts
 import { Router } from 'express'
 import { sendMessageController } from '../controllers/whatsapp.controller'
 

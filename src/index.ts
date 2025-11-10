@@ -1,4 +1,4 @@
-//melembra-server/src/index.ts
+//bora-server/src/index.ts
 import express from 'express'
 import dotenv from 'dotenv'
 import whatsappRoutes from './routes/whatsapp.routes'

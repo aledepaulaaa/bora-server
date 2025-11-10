@@ -1,4 +1,4 @@
-//melembra-server/src/services/jobHandlers.ts
+//bora-server/src/services/jobHandlers.ts
 import admin from 'firebase-admin'
 import { Buttons } from 'whatsapp-web.js'
 import { getFirebaseFirestore } from '../database/firebase-admin'

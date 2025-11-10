@@ -1,4 +1,4 @@
-// melembra-server/src/services/whatsapp.service.ts
+//bora-server/src/services/whatsapp.service.ts
 import { initialize } from './whatsappClient'
 
 // A única responsabilidade deste arquivo é iniciar o serviço.

@@ -1,4 +1,4 @@
-//melembra-server/src/services/whatsappBot.ts
+//bora-server/src/services/whatsappBot.ts
 import { Message } from 'whatsapp-web.js'
 import * as chrono from 'chrono-node'
 import admin from 'firebase-admin'
@@ -48,7 +48,7 @@ async function startReminderFlow(chatId: string) {
     const usersQuery = await db.collection('users').where('whatsappNumber', '==', number).limit(1).get()
 
     if (usersQuery.empty) {
-        client.sendMessage(chatId, "Desculpe, não encontrei sua conta Me Lembra. Verifique se o número de WhatsApp cadastrado no app está correto.")
+        client.sendMessage(chatId, "Desculpe, não encontrei sua conta Bora. Verifique se o número de WhatsApp cadastrado no app está correto.")
         return
     }
     const userId = usersQuery.docs[0].id
@@ -103,7 +103,7 @@ async function handleDateTimeResponse(message: Message, conversationRef: admin.f
         await conversationRef.delete()
 
         const successMessage = `Lembrete salvo com sucesso para ${parsedDate.toLocaleString('pt-BR')}! ✨\n\nPara criar lembretes com recorrência, 
-        abra o app Me Lembra e personalize do seu jeito! 😉\n\nhttps://melembra.vercel.app/`
+        abra o app Bora e personalize do seu jeito! 😉\n\nhttps://bora-app.vercel.app/`
         client.sendMessage(message.from, successMessage)
     } catch (error) {
         console.error("Erro ao salvar lembrete via WhatsApp:", error)

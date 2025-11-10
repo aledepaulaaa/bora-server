@@ -1,4 +1,4 @@
-//melembra-server/src/services/jobTestHandler.ts
+//bora-server/src/services/jobTestHandler.ts
 import admin from 'firebase-admin'
 import { getFirebaseFirestore } from '../database/firebase-admin'
 import { IReminder } from '../interfaces/IReminder'

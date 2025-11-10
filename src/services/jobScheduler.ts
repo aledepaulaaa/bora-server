@@ -1,4 +1,4 @@
-//melembra-server/src/services/jobScheduler.ts
+//bora-server/src/services/jobScheduler.ts
 import cron, { ScheduledTask } from 'node-cron'
 
 // 1. Importa as funções "o quê fazer" do nosso novo módulo de handlers

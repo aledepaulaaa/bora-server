@@ -1,4 +1,4 @@
-// melembra-server/src/services/whatsappClient.ts
+//bora-server/src/services/whatsappClient.ts
 import { Client, LocalAuth } from 'whatsapp-web.js'
 import qrcode from 'qrcode-terminal'
 import fs from 'fs'
