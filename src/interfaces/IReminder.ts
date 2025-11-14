@@ -9,5 +9,5 @@ export interface IReminder {
     phoneNumber?: string // Opcional, para o WhatsApp
     scheduledAt: Timestamp
     sent?: boolean
-    recurrence?: 'Não repetir' | 'Diariamente' | 'Semanalmente' | 'Mensalmente' | 'Anualmente'
+    recurrence?: 'Não repetir' | 'Diariamente' | 'Semanalmente' | 'Mensalmente'
 }
