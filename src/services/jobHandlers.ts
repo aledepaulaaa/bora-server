@@ -3,6 +3,8 @@ import admin from 'firebase-admin'
 import { getFirebaseFirestore } from '../database/firebase-admin'
 import { IReminder } from '../interfaces/IReminder'
 import { encontrarNumeroCelular, enviarMensagemWhatsApp } from './jobWhatsApp'
+import { getUserSubscriptionPlan } from './subscription.service'
+import { updateNextRecurrence, updateReminderSentStatus } from './reminder.service'
 
 const db = getFirebaseFirestore()
 
@@ -48,6 +50,22 @@ export async function enviarLembretesPessoais() {
 
     for (const doc of allDocs) {
         const reminder = doc.data() as IReminder
+
+        const isRecurring = reminder.recurrence && reminder.recurrence !== 'Não repetir';
+
+        // --- INJEÇÃO DA LÓGICA DE VERIFICAÇÃO DE PLANO ---
+        if (isRecurring) {
+            const userPlan = await getUserSubscriptionPlan(reminder.userId);
+            if (userPlan.plan === 'free') {
+                console.log(`   - 🚫 Lembrete recorrente [${doc.id}] PULADO. Usuário [${reminder.userId}] é do plano free.`);
+                // Marca como 'sent: true' para que ele não seja pego novamente.
+                // É um lembrete recorrente inválido para o plano, então o desativamos.
+                await updateReminderSentStatus(doc.id)
+                continue; // Pula para o próximo lembrete da lista.
+            }
+        }
+        // --- FIM DA LÓGICA DE VERIFICAÇÃO ---
+
         const scheduledAtDate = reminder.scheduledAt.toDate()
 
         console.log(`\n--- Processando Lembrete ID: ${doc.id} ---`)
@@ -70,21 +88,20 @@ export async function enviarLembretesPessoais() {
         }
         // --- FIM DO LOG DETALHADO ---
 
-        const recurrence = reminder.recurrence || 'Não repetir'
-        if (recurrence === 'Não repetir') {
-            await doc.ref.update({ sent: true })
+        if (!isRecurring) {
+            await updateNextRecurrence(doc.id, reminder.recurrence!, reminder.scheduledAt.toDate())
             console.log(`   - 🏁 Lembrete ${doc.id} marcado como concluído.`)
         } else {
             const currentScheduledAt = reminder.scheduledAt.toDate()
             const nextScheduledAt = new Date(currentScheduledAt)
 
-            switch (recurrence) {
+            switch (reminder.recurrence) {
                 case 'Diariamente': nextScheduledAt.setDate(nextScheduledAt.getDate() + 1); break
                 case 'Semanalmente': nextScheduledAt.setDate(nextScheduledAt.getDate() + 7); break
                 case 'Mensalmente': nextScheduledAt.setMonth(nextScheduledAt.getMonth() + 1); break
             }
 
-            await doc.ref.update({ scheduledAt: admin.firestore.Timestamp.fromDate(nextScheduledAt) })
+            await updateReminderSentStatus(doc.id)
             console.log(`   - 🔄 Lembrete ${doc.id} reagendado para ${nextScheduledAt.toISOString()}.`)
         }
     }

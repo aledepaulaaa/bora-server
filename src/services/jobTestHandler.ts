@@ -2,7 +2,7 @@
 import admin from 'firebase-admin'
 import { getFirebaseFirestore } from '../database/firebase-admin'
 import { IReminder } from '../interfaces/IReminder'
-import { sendWhatsappMessage } from './jobHandlers' // Reutiliza a função de envio principal
+import { enviarMensagemWhatsApp } from './jobWhatsApp'
 
 const db = getFirebaseFirestore()
 const ADMIN_PHONE_NUMBER = '553187424020' // Seu número de teste
@@ -42,7 +42,7 @@ export async function sendAdminTestReminder() {
 
         // 3. Enviar a mensagem de teste
         const message = `[TESTE DE SERVIDOR] 🚀\nSeu lembrete "${reminder.title}" está funcionando!`
-        const result = await sendWhatsappMessage(ADMIN_PHONE_NUMBER, message)
+        const result = await enviarMensagemWhatsApp(ADMIN_PHONE_NUMBER, message)
 
         if (result.success) {
             console.log('✅ 🧪 Teste: Mensagem de teste enviada com sucesso!')
