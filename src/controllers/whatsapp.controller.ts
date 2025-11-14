@@ -1,6 +1,6 @@
 //bora-server/src/controllers/whatsapp.controllers.ts
 import { Request, Response } from 'express'
-import { sendWhatsappMessage } from '../services/jobHandlers'
+import { enviarMensagemWhatsApp } from '../services/jobWhatsApp'
 
 export const sendMessageController = async (req: Request, res: Response) => {
     const { number, message } = req.body
@@ -10,7 +10,7 @@ export const sendMessageController = async (req: Request, res: Response) => {
     }
 
     try {
-        const result = await sendWhatsappMessage(number, message)
+        const result = await enviarMensagemWhatsApp(number, message)
         if (result && result.success) {
             res.status(200).send({ message: `Mensagem enviada para ${number}` })
         } else {
