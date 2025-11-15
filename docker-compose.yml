@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  bora-server:
+    image: girafainquestionavel/bora-server:latest # Substitua pelo seu usuário
+    container_name: bora-server-container
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./.wwebjs_auth:/app/.wwebjs_auth # <-- PERSISTÊNCIA DA SESSÃO WHATSAPP
+    ports:
+      - "2525:2525" # Mapeia a porta da VPS para a porta do container
