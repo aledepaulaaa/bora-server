@@ -3,15 +3,17 @@ import qrcode from 'qrcode-terminal'
 import fs from 'fs'
 import { handleIncomingMessage } from './whatsappBot'
 import { startCronJobs, stopCronJobs } from './jobScheduler'
+// import puppeteer from 'puppeteer'
 
 let client: Client
 
 function createAndConfigureClient() {
     console.log("Iniciando nova instância do cliente WhatsApp...")
     client = new Client({
-        authStrategy: new LocalAuth(),
+        authStrategy: new LocalAuth({ dataPath: undefined}),
         puppeteer: ({
             headless: true, // Garante que o navegador rode em segundo plano
+            // executablePath: puppeteer.executablePath(),
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -25,14 +27,14 @@ function createAndConfigureClient() {
         }) as any
     })
 
-    // client.on('qr', (qr) => qrcode.generate(qr, { small: true }))
+    client.on('qr', (qr) => qrcode.generate(qr, { small: true }))
     // handler do 'code' para pegar o código de 8 caracteres conectar sem qr-code
-    client.on('code', (code) => {
-        console.log('================================================')
-        console.log(`> Código de conexão: ${code}`)
-        console.log('> Abra seu WhatsApp no celular > Aparelhos Conectados > Conectar com número de telefone e digite o código acima.')
-        console.log('================================================')
-    })
+    // client.on('code', (code) => {
+    //     console.log('================================================')
+    //     console.log(`> Código de conexão: ${code}`)
+    //     console.log('> Abra seu WhatsApp no celular > Aparelhos Conectados > Conectar com número de telefone e digite o código acima.')
+    //     console.log('================================================')
+    // })
     client.on('authenticated', () => console.log('✅ Autenticado com sucesso!'))
     client.on('auth_failure', (msg) => console.error('❌ Falha na autenticação:', msg))
     client.on('error', (err) => console.error('Ocorreu um erro inesperado no cliente:', err))
