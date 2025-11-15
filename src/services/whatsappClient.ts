@@ -29,12 +29,12 @@ function createAndConfigureClient() {
 
     client.on('qr', (qr) => qrcode.generate(qr, { small: true }))
     // handler do 'code' para pegar o código de 8 caracteres conectar sem qr-code
-    // client.on('code', (code) => {
-    //     console.log('================================================')
-    //     console.log(`> Código de conexão: ${code}`)
-    //     console.log('> Abra seu WhatsApp no celular > Aparelhos Conectados > Conectar com número de telefone e digite o código acima.')
-    //     console.log('================================================')
-    // })
+    client.on('code', (code) => {
+        console.log('================================================')
+        console.log(`> Código de conexão: ${code}`)
+        console.log('> Abra seu WhatsApp no celular > Aparelhos Conectados > Conectar com número de telefone e digite o código acima.')
+        console.log('================================================')
+    })
     client.on('authenticated', () => console.log('✅ Autenticado com sucesso!'))
     client.on('auth_failure', (msg) => console.error('❌ Falha na autenticação:', msg))
     client.on('error', (err) => console.error('Ocorreu um erro inesperado no cliente:', err))
