@@ -23,7 +23,7 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v4
         with:
-          context: ./bora-server  # O caminho para o seu Dockerfile
+          context: .  # O caminho para o seu Dockerfile
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/bora-server:latest # O nome da imagem
 
