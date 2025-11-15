@@ -1,0 +1,50 @@
+name: CI/CD - Build and Deploy Bora Server
+
+on:
+  push:
+    branches:
+      - master  # ou 'main', dependendo do seu branch principal
+    paths:
+      - 'bora-server/**' # Só roda se houver mudanças na pasta do servidor
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .  # O caminho para o seu Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/bora-server:latest # O nome da imagem
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-push # Só roda depois que o build terminar com sucesso
+    steps:
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            # Navega para o diretório do projeto na VPS
+            cd /root/bora-server
+            # Cria o arquivo .env de forma segura a partir do secret do GitHub
+            echo "${{ secrets.ENV_FILE_CONTENT }}" > .env
+            # Puxa a imagem mais recente do Docker Hub
+            docker-compose pull
+            # Sobe o container com a nova imagem, recriando-o
+            docker-compose up -d --force-recreate
+            # Limpa imagens antigas e não utilizadas para economizar espaço
+            docker image prune -f
