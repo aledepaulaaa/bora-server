@@ -44,16 +44,21 @@ export async function updateNextRecurrence(
                 nextScheduledAt.setMonth(nextScheduledAt.getMonth() + 1)
                 break
             default:
-                // Se a recorrência for inválida, não faz nada
+                // Se for "Não repetir" ou inválido, apenas ignora
                 return
         }
 
         const reminderRef = db.collection('reminders').doc(reminderId)
+
+        // --- CORREÇÃO CRÍTICA AQUI ---
+        // Agora, além de atualizar a data, nós REDEFINIMOS 'sent' para 'false'.
+        // Isso "rearmazena" o lembrete para que ele possa ser pego pelo job no futuro.
         await reminderRef.update({
-            scheduledAt: admin.firestore.Timestamp.fromDate(nextScheduledAt)
+            scheduledAt: admin.firestore.Timestamp.fromDate(nextScheduledAt),
+            sent: false
         })
 
-        console.log(`   - 🔄 Lembrete [${reminderId}] reagendado para ${nextScheduledAt.toISOString()}.`)
+        console.log(`   - 🔄 Lembrete [${reminderId}] reagendado para ${nextScheduledAt.toISOString()} e resetado.`)
 
     } catch (error) {
         console.error(`   - ❌ Erro ao reagendar o lembrete [${reminderId}]:`, error)

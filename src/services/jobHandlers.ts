@@ -26,6 +26,9 @@ export async function enviarLembretesPessoais() {
     const now = new Date()
     const nowTimestamp = admin.firestore.Timestamp.fromDate(now)
 
+    // Log para verificar o tempo do servidor, crucial para depuração
+    console.log(`   - Hora atual do servidor (UTC): ${now.toISOString()}`)
+
     // Query para lembretes únicos
     const snapshot = await db.collection('reminders')
         .where('recurrence', '==', 'Não repetir')
@@ -33,11 +36,10 @@ export async function enviarLembretesPessoais() {
         .where('scheduledAt', '<=', nowTimestamp)
         .get()
 
-    // --- MELHORIA: Adicionado o filtro `where('sent', '==', false)` aqui também ---
-    // Isso cria uma camada extra de proteção.
+    // Query para lembretes recorrentes
     const recurringSnapshot = await db.collection('reminders')
         .where('recurrence', 'in', ['Diariamente', 'Semanalmente', 'Mensalmente'])
-        .where('sent', '==', false) // Garante que não pegamos um lembrete que já foi tratado no mesmo ciclo
+        .where('sent', '==', false)
         .where('scheduledAt', '<=', nowTimestamp)
         .get()
 
@@ -51,25 +53,22 @@ export async function enviarLembretesPessoais() {
 
     for (const doc of allDocs) {
         const reminder = doc.data() as IReminder
-        const isRecurring = reminder.recurrence && reminder.recurrence !== 'Não repetir';
+        const isRecurring = reminder.recurrence !== 'Não repetir'
 
-        console.log(`\n--- Processando Lembrete ID: ${doc.id} | Recorrente: ${isRecurring} ---`);
+        console.log(`\n--- Processando Lembrete ID: ${doc.id} | Recorrente: ${isRecurring} ---`)
+        console.log(`   - Agendado para (UTC): ${reminder.scheduledAt.toDate().toISOString()}`)
 
-        // Lógica de verificação de plano para usuários 'free' (sua lógica aqui está correta)
+        // Sua lógica de verificação de plano (continua correta)
         if (isRecurring) {
-            const userPlan = await getUserSubscriptionPlan(reminder.userId);
+            const userPlan = await getUserSubscriptionPlan(reminder.userId)
             if (userPlan.plan === 'free') {
-                console.log(`   - 🚫 Lembrete recorrente [${doc.id}] PULADO para usuário free.`);
-                await updateReminderSentStatus(doc.id) // Desativa para não ser pego de novo
-                continue;
+                console.log(`   - 🚫 Lembrete recorrente [${doc.id}] PULADO para usuário free.`)
+                await updateReminderSentStatus(doc.id)
+                continue
             }
         }
 
-        // --- Marca como enviado IMEDIATAMENTE ---
-        // Isso previne que, se o envio demorar, o próximo job (em 2 min) pegue o mesmo lembrete
-        await db.collection('reminders').doc(doc.id).update({ sent: true });
-        console.log(`   - ⌛ Lembrete [${doc.id}] marcado como 'sent: true' para evitar duplicatas.`);
-
+        // A lógica de enviar a mensagem continua a mesma
         const phoneNumber = await encontrarNumeroCelular(reminder.userId)
         if (phoneNumber) {
             const time = reminder.scheduledAt.toDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
@@ -79,17 +78,13 @@ export async function enviarLembretesPessoais() {
             console.log(`   - ⚠️ Número NÃO encontrado para o usuário ${reminder.userId}.`)
         }
 
-        // --- LÓGICA DE ATUALIZAÇÃO CORRIGIDA ---
+        // --- LÓGICA DE ATUALIZAÇÃO FINAL E CORRETA ---
         if (isRecurring) {
-            // Se for recorrente, calcula a próxima data e a salva no banco de dados.
-            // Também redefine 'sent' para 'false' para que o job possa pegá-lo no futuro.
-            console.log('   - É um lembrete recorrente. Reagendando...');
-            await updateNextRecurrence(doc.id, reminder.recurrence!, reminder.scheduledAt.toDate());
-
+            // Se for recorrente, chama a função que atualiza a data E reseta o 'sent'
+            await updateNextRecurrence(doc.id, reminder.recurrence!, reminder.scheduledAt.toDate())
         } else {
-            // Se NÃO for recorrente, o trabalho está feito. Apenas registramos no log.
-            // O status 'sent: true' já foi definido no início do loop.
-            console.log(`   - ✅ Lembrete único [${doc.id}] concluído.`);
+            // Se NÃO for recorrente, apenas marca como 'sent: true' para nunca mais ser enviado.
+            await updateReminderSentStatus(doc.id)
         }
     }
 }
