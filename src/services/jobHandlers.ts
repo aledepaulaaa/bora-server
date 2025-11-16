@@ -79,7 +79,7 @@ export async function enviarLembretesPessoais() {
         if (phoneNumber) {
             console.log(`   - ✅ Número de telefone encontrado: ${phoneNumber}`)
             const time = reminder.scheduledAt.toDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
-            const message = `Melembra veio te lembrar: "${reminder.title}" começa às ${time}!`
+            const message = `Bora veio te lembrar: "${reminder.title}" começa às ${time}!`
 
             console.log(`   - 💬 Preparando para enviar a mensagem: "${message}"`)
             await enviarMensagemWhatsApp(phoneNumber, message)
