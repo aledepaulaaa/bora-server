@@ -20,28 +20,29 @@ export async function acionarLembretesProximos() {
     }
 }
 
+// Copie e cole a função inteira para substituir a existente
 export async function enviarLembretesPessoais() {
     console.log('--- ⏰ INICIANDO JOB: Verificando lembretes no horário (WhatsApp)... ---')
     const now = new Date()
     const nowTimestamp = admin.firestore.Timestamp.fromDate(now)
 
-    // --- LOGS DE DEPURAÇÃO DE TEMPO ---
-    console.log(`   - Hora atual do servidor (ISO/UTC): ${now.toISOString()}`)
-    console.log(`   - Timestamp usado na query: ${nowTimestamp.toDate().toISOString()}`)
-
+    // Query para lembretes únicos
     const snapshot = await db.collection('reminders')
         .where('recurrence', '==', 'Não repetir')
         .where('sent', '==', false)
         .where('scheduledAt', '<=', nowTimestamp)
         .get()
 
+    // --- MELHORIA: Adicionado o filtro `where('sent', '==', false)` aqui também ---
+    // Isso cria uma camada extra de proteção.
     const recurringSnapshot = await db.collection('reminders')
         .where('recurrence', 'in', ['Diariamente', 'Semanalmente', 'Mensalmente'])
+        .where('sent', '==', false) // Garante que não pegamos um lembrete que já foi tratado no mesmo ciclo
         .where('scheduledAt', '<=', nowTimestamp)
         .get()
 
     if (snapshot.empty && recurringSnapshot.empty) {
-        console.log(`⏰ Nenhum lembrete encontrado para antes de ${now.toLocaleTimeString('pt-BR')}. Verificação concluída.`)
+        console.log(`⏰ Nenhum lembrete pendente encontrado. Verificação concluída.`)
         return
     }
 
@@ -50,59 +51,45 @@ export async function enviarLembretesPessoais() {
 
     for (const doc of allDocs) {
         const reminder = doc.data() as IReminder
-
         const isRecurring = reminder.recurrence && reminder.recurrence !== 'Não repetir';
 
-        // --- INJEÇÃO DA LÓGICA DE VERIFICAÇÃO DE PLANO ---
+        console.log(`\n--- Processando Lembrete ID: ${doc.id} | Recorrente: ${isRecurring} ---`);
+
+        // Lógica de verificação de plano para usuários 'free' (sua lógica aqui está correta)
         if (isRecurring) {
             const userPlan = await getUserSubscriptionPlan(reminder.userId);
             if (userPlan.plan === 'free') {
-                console.log(`   - 🚫 Lembrete recorrente [${doc.id}] PULADO. Usuário [${reminder.userId}] é do plano free.`);
-                // Marca como 'sent: true' para que ele não seja pego novamente.
-                // É um lembrete recorrente inválido para o plano, então o desativamos.
-                await updateReminderSentStatus(doc.id)
-                continue; // Pula para o próximo lembrete da lista.
+                console.log(`   - 🚫 Lembrete recorrente [${doc.id}] PULADO para usuário free.`);
+                await updateReminderSentStatus(doc.id) // Desativa para não ser pego de novo
+                continue;
             }
         }
-        // --- FIM DA LÓGICA DE VERIFICAÇÃO ---
 
-        const scheduledAtDate = reminder.scheduledAt.toDate()
+        // --- Marca como enviado IMEDIATAMENTE ---
+        // Isso previne que, se o envio demorar, o próximo job (em 2 min) pegue o mesmo lembrete
+        await db.collection('reminders').doc(doc.id).update({ sent: true });
+        console.log(`   - ⌛ Lembrete [${doc.id}] marcado como 'sent: true' para evitar duplicatas.`);
 
-        console.log(`\n--- Processando Lembrete ID: ${doc.id} ---`)
-        console.log(`   - Horário agendado (ISO/UTC): ${scheduledAtDate.toISOString()}`)
-        console.log(`   - Título: "${reminder.title}"`)
-        console.log(`   - Para Usuário ID: ${reminder.userId}`)
-
-        // --- LOG DETALHADO DA BUSCA DO NÚMERO ---
         const phoneNumber = await encontrarNumeroCelular(reminder.userId)
-
         if (phoneNumber) {
-            console.log(`   - ✅ Número de telefone encontrado: ${phoneNumber}`)
             const time = reminder.scheduledAt.toDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
             const message = `Bora veio te lembrar: "${reminder.title}" começa às ${time}!`
-
-            console.log(`   - 💬 Preparando para enviar a mensagem: "${message}"`)
             await enviarMensagemWhatsApp(phoneNumber, message)
         } else {
-            console.log(`   - ⚠️ Número de telefone NÃO encontrado para o usuário ${reminder.userId}. Lembrete não pode ser enviado.`)
+            console.log(`   - ⚠️ Número NÃO encontrado para o usuário ${reminder.userId}.`)
         }
-        // --- FIM DO LOG DETALHADO ---
 
-        if (!isRecurring) {
-            await updateNextRecurrence(doc.id, reminder.recurrence!, reminder.scheduledAt.toDate())
-            console.log(`   - 🏁 Lembrete ${doc.id} marcado como concluído.`)
+        // --- LÓGICA DE ATUALIZAÇÃO CORRIGIDA ---
+        if (isRecurring) {
+            // Se for recorrente, calcula a próxima data e a salva no banco de dados.
+            // Também redefine 'sent' para 'false' para que o job possa pegá-lo no futuro.
+            console.log('   - É um lembrete recorrente. Reagendando...');
+            await updateNextRecurrence(doc.id, reminder.recurrence!, reminder.scheduledAt.toDate());
+
         } else {
-            const currentScheduledAt = reminder.scheduledAt.toDate()
-            const nextScheduledAt = new Date(currentScheduledAt)
-
-            switch (reminder.recurrence) {
-                case 'Diariamente': nextScheduledAt.setDate(nextScheduledAt.getDate() + 1); break
-                case 'Semanalmente': nextScheduledAt.setDate(nextScheduledAt.getDate() + 7); break
-                case 'Mensalmente': nextScheduledAt.setMonth(nextScheduledAt.getMonth() + 1); break
-            }
-
-            await updateReminderSentStatus(doc.id)
-            console.log(`   - 🔄 Lembrete ${doc.id} reagendado para ${nextScheduledAt.toISOString()}.`)
+            // Se NÃO for recorrente, o trabalho está feito. Apenas registramos no log.
+            // O status 'sent: true' já foi definido no início do loop.
+            console.log(`   - ✅ Lembrete único [${doc.id}] concluído.`);
         }
     }
 }
