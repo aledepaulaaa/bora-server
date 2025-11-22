@@ -103,7 +103,7 @@ async function handleDateTimeResponse(message: Message, conversationRef: admin.f
         await conversationRef.delete()
 
         const successMessage = `Lembrete salvo com sucesso para ${parsedDate.toLocaleString('pt-BR')}! ✨\n\nPara criar lembretes com recorrência, 
-        abra o app Bora e personalize do seu jeito! 😉\n\nhttps://bora-app.vercel.app/`
+        abra o app Bora e personalize do seu jeito! 😉\n\nhttps://www.aplicativobora.com.br/`
         client.sendMessage(message.from, successMessage)
     } catch (error) {
         console.error("Erro ao salvar lembrete via WhatsApp:", error)
