@@ -32,33 +32,34 @@ export async function updateNextRecurrence(
 ): Promise<void> {
     try {
         const nextScheduledAt = new Date(currentScheduledAt)
+        const now = new Date()
 
-        switch (recurrence) {
-            case 'Diariamente':
-                nextScheduledAt.setDate(nextScheduledAt.getDate() + 1)
-                break
-            case 'Semanalmente':
-                nextScheduledAt.setDate(nextScheduledAt.getDate() + 7)
-                break
-            case 'Mensalmente':
-                nextScheduledAt.setMonth(nextScheduledAt.getMonth() + 1)
-                break
-            default:
-                // Se for "Não repetir" ou inválido, apenas ignora
-                return
+        while (nextScheduledAt <= now) {
+            switch (recurrence) {
+                case 'Diariamente':
+                    nextScheduledAt.setDate(nextScheduledAt.getDate() + 1)
+                    break
+                case 'Semanalmente':
+                    nextScheduledAt.setDate(nextScheduledAt.getDate() + 7)
+                    break
+                case 'Mensalmente':
+                    nextScheduledAt.setMonth(nextScheduledAt.getMonth() + 1)
+                    break
+                default:
+                    // Se a recorrência for desconhecida, apenas sai do loop para evitar travamento
+                    // e joga 1 dia pra frente por segurança ou não faz nada.
+                    console.warn(`Recorrência desconhecida: ${recurrence}`)
+                    return
+            }
         }
 
         const reminderRef = db.collection('reminders').doc(reminderId)
-
-        // --- CORREÇÃO CRÍTICA AQUI ---
-        // Agora, além de atualizar a data, nós REDEFINIMOS 'sent' para 'false'.
-        // Isso "rearmazena" o lembrete para que ele possa ser pego pelo job no futuro.
         await reminderRef.update({
             scheduledAt: admin.firestore.Timestamp.fromDate(nextScheduledAt),
             sent: false
         })
 
-        console.log(`   - 🔄 Lembrete [${reminderId}] reagendado para ${nextScheduledAt.toISOString()} e resetado.`)
+        console.log(`   - 🔄 Lembrete [${reminderId}] reagendado para ${nextScheduledAt.toLocaleString('pt-BR')} (Data Futura Garantida).`)
 
     } catch (error) {
         console.error(`   - ❌ Erro ao reagendar o lembrete [${reminderId}]:`, error)

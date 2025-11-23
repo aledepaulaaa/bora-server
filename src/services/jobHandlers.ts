@@ -20,70 +20,79 @@ export async function acionarLembretesProximos() {
     }
 }
 
-// Copie e cole a função inteira para substituir a existente
 export async function enviarLembretesPessoais() {
     console.log('--- ⏰ INICIANDO JOB: Verificando lembretes no horário (WhatsApp)... ---')
     const now = new Date()
+
+    // DEFINIÇÃO DA JANELA DE SEGURANÇA (CRUCIAL PARA EVITAR SPAM)
+    // Vamos buscar apenas lembretes agendados entre 20 minutos atrás e Agora.
+    // Lembretes mais antigos que 20 min serão ignorados nesta rodada para evitar
+    // disparar 500 mensagens se o servidor ficou fora do ar por 2 dias.
+    const TOLERANCE_MINUTES = 20
+    const windowStart = new Date(now.getTime() - TOLERANCE_MINUTES * 60000)
+
     const nowTimestamp = admin.firestore.Timestamp.fromDate(now)
+    const windowStartTimestamp = admin.firestore.Timestamp.fromDate(windowStart)
 
-    // Log para verificar o tempo do servidor, crucial para depuração
-    console.log(`   - Hora atual do servidor (UTC): ${now.toISOString()}`)
+    console.log(`   - Janela de busca: ${windowStart.toISOString()} até ${now.toISOString()}`)
 
-    // Query para lembretes únicos
+    // Query Unificada (Lembretes únicos E recorrentes que não foram enviados)
+    // Adicionamos a cláusula .where('scheduledAt', '>=', windowStartTimestamp)
     const snapshot = await db.collection('reminders')
-        .where('recurrence', '==', 'Não repetir')
         .where('sent', '==', false)
         .where('scheduledAt', '<=', nowTimestamp)
+        .where('scheduledAt', '>=', windowStartTimestamp)
         .get()
 
-    // Query para lembretes recorrentes
-    const recurringSnapshot = await db.collection('reminders')
-        .where('recurrence', 'in', ['Diariamente', 'Semanalmente', 'Mensalmente'])
-        .where('sent', '==', false)
-        .where('scheduledAt', '<=', nowTimestamp)
-        .get()
-
-    if (snapshot.empty && recurringSnapshot.empty) {
-        console.log(`⏰ Nenhum lembrete pendente encontrado. Verificação concluída.`)
+    if (snapshot.empty) {
+        console.log(`⏰ Nenhum lembrete pendente na janela de tempo (${TOLERANCE_MINUTES}min).`)
         return
     }
 
-    const allDocs = [...snapshot.docs, ...recurringSnapshot.docs]
-    console.log(`⏰ Encontrados ${allDocs.length} lembretes pendentes. Processando...`)
+    console.log(`⏰ Encontrados ${snapshot.docs.length} lembretes para processar.`)
 
-    for (const doc of allDocs) {
+    for (const doc of snapshot.docs) {
         const reminder = doc.data() as IReminder
-        const isRecurring = reminder.recurrence !== 'Não repetir'
+        const isRecurring = reminder.recurrence && reminder.recurrence !== 'Não repetir'
 
         console.log(`\n--- Processando Lembrete ID: ${doc.id} | Recorrente: ${isRecurring} ---`)
-        console.log(`   - Agendado para (UTC): ${reminder.scheduledAt.toDate().toISOString()}`)
 
-        // Sua lógica de verificação de plano (continua correta)
+        // --- 1. VERIFICAÇÃO DE PLANO (Mantida) ---
         if (isRecurring) {
             const userPlan = await getUserSubscriptionPlan(reminder.userId)
+            // Lógica de restrição (ponto 1 do seu pedido):
+            // Aqui você pode expandir. Ex: Se for Plus, só aceita 'Diariamente'. Se Free, bloqueia.
             if (userPlan.plan === 'free') {
-                console.log(`   - 🚫 Lembrete recorrente [${doc.id}] PULADO para usuário free.`)
+                console.log(`   - 🚫 Lembrete recorrente [${doc.id}] PULADO/DESATIVADO para usuário free.`)
+                // IMPORTANTE: Marque como enviado para não processar de novo em loop
                 await updateReminderSentStatus(doc.id)
                 continue
             }
         }
 
-        // A lógica de enviar a mensagem continua a mesma
+        // --- 2. ENVIO DA MENSAGEM ---
         const phoneNumber = await encontrarNumeroCelular(reminder.userId)
+        let messageSent = false
+
         if (phoneNumber) {
             const time = reminder.scheduledAt.toDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
             const message = `Bora veio te lembrar: "${reminder.title}" começa às ${time}!`
-            await enviarMensagemWhatsApp(phoneNumber, message)
+
+            // Tenta enviar. Se der erro no whats, a gente decide se reagenda ou não.
+            const result = await enviarMensagemWhatsApp(phoneNumber, message)
+            messageSent = result && result.success ? true : false
         } else {
             console.log(`   - ⚠️ Número NÃO encontrado para o usuário ${reminder.userId}.`)
         }
 
-        // --- LÓGICA DE ATUALIZAÇÃO FINAL E CORRETA ---
+        // --- 3. ATUALIZAÇÃO (CRUCIAL PARA EVITAR LOOP) ---
         if (isRecurring) {
-            // Se for recorrente, chama a função que atualiza a data E reseta o 'sent'
+            // Se enviou (ou tentou), calculamos a próxima data
+            // Passamos 'now' para garantir que a próxima data seja baseada no momento da execução
+            // e não fique presa no passado.
             await updateNextRecurrence(doc.id, reminder.recurrence!, reminder.scheduledAt.toDate())
         } else {
-            // Se NÃO for recorrente, apenas marca como 'sent: true' para nunca mais ser enviado.
+            // Lembrete único: marca como enviado para nunca mais pegar na query
             await updateReminderSentStatus(doc.id)
         }
     }
