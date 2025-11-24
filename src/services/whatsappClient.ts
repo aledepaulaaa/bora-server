@@ -6,103 +6,111 @@ import { handleIncomingMessage } from './whatsappBot'
 import { startCronJobs, stopCronJobs } from './jobScheduler'
 
 let client: Client
+// Variável de controle para impedir disparos múltiplos do evento 'ready'
+let isClientReady = false
 
 function createAndConfigureClient() {
     console.log("Iniciando nova instância do cliente WhatsApp...")
 
+    // Reset do estado
+    isClientReady = false
+
     client = new Client({
-        authStrategy: new LocalAuth({ 
-            dataPath: './.wwebjs_auth' // Define explicitamente o caminho para organização
+        authStrategy: new LocalAuth({
+            dataPath: './.wwebjs_auth',
+            clientId: 'business_client' // Adiciona um ID específico para organizar a pasta
         }),
-        // --- CORREÇÃO 1: Fixar versão do WhatsApp Web ---
-        // Isso impede que o bot quebre quando o WhatsApp atualiza o site deles.
-        // Usamos o tipo 'remote' para pegar uma versão compatível confirmada pela comunidade.
-        webVersionCache: {
-            type: 'remote',
-            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
-        },
+        // REMOVIDO: webVersionCache remoto. 
+        // Para Business, vamos deixar a lib negociar a versão mais compatível localmente.
+
+        // Aumenta o tempo de resposta para mensagens (Business demora mais)
+        qrMaxRetries: 3,
+
         puppeteer: {
             headless: true,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
+                '--disable-dev-shm-usage', // Crítico para evitar crash de memória
                 '--disable-gpu',
-                '--disable-extensions'
+                '--disable-extensions',
+                '--no-first-run',
+                '--no-zygote',
+                // Argumento vital para contas com muitas conversas/dados:
+                '--unhandled-rejections=strict'
             ],
-            // Mantemos o UserAgent pois ajuda no WhatsApp Business
             userAgent: 'Mozilla/5.0 (Macintosh Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
         } as any
     })
 
     client.on('qr', (qr) => {
-        console.log('--- QR CODE GERADO ---')
+        console.log('--- QR CODE GERADO (Escaneie com o WhatsApp Business) ---')
         qrcode.generate(qr, { small: true })
     })
 
-    client.on('code', (code) => {
-        console.log(`> Código de conexão: ${code}`)
-    })
-
     client.on('loading_screen', (percent, message) => {
-        console.log(`⏳ Carregando WhatsApp Web: ${percent}% - ${message}`)
+        console.log(`⏳ Sincronizando: ${percent}% - ${message}`)
     })
 
     client.on('authenticated', () => {
-        console.log('✅ Autenticado com sucesso!')
+        console.log('✅ Autenticado! Aguardando sincronização final...')
     })
 
-    // --- CORREÇÃO 2: Só apagar sessão se a senha estiver errada ---
     client.on('auth_failure', async (msg) => {
-        console.error('❌ Falha crítica na autenticação (Sessão inválida):', msg)
-        stopCronJobs()
-        
-        // Aqui sim, se a autenticação falhou, apagamos a pasta para gerar novo QR Code
-        const sessionPath = './.wwebjs_auth'
-        if (fs.existsSync(sessionPath)) {
-            console.log("Apagando sessão corrompida...")
-            await fs.promises.rm(sessionPath, { recursive: true, force: true })
-        }
-        
-        // Reinicia processo drasticamente ou aguarda intervenção manual
-        // process.exit(1) // Opcional: força o PM2 a reiniciar limpo
+        console.error('❌ Falha crítica na autenticação:', msg)
+        await cleanSessionAndRestart()
     })
 
+    // --- CORREÇÃO DO LOOP DE READY ---
     client.on('ready', () => {
-        console.log('✅✅ Cliente WhatsApp está pronto e operante!')
+        if (isClientReady) {
+            console.log('ℹ️ Evento Ready duplicado ignorado.')
+            return
+        }
+
+        isClientReady = true
+        console.log('✅✅ Cliente WhatsApp Business TOTALMENTE carregado!')
         startCronJobs()
     })
 
     client.on('message', handleIncomingMessage)
 
-    // --- CORREÇÃO 3: Lógica de Desconexão Suave ---
-    // Não apague a sessão aqui! Apenas tente reconectar.
     client.on('disconnected', async (reason) => {
         console.warn(`⚠️ Cliente desconectado. Motivo: ${reason}`)
         stopCronJobs()
+        isClientReady = false // Reseta o estado
 
-        // O whatsapp-web.js geralmente tenta reconectar sozinho se não destruirmos o client.
-        // Mas se a conexão cair de vez (ex: "LOGOUT" pelo celular), precisamos reiniciar.
-        
-        if (reason === 'LOGOUT') {
-             console.log("Detectado Logout ou Navegação indevida. Reiniciando sessão...")
-             try {
-                 await client.destroy()
-             } catch (e) { /* ignorar erro de destroy */ }
-             
-             // Se foi logout, aí sim limpamos a sessão
-             if (reason === 'LOGOUT') {
-                 const sessionPath = './.wwebjs_auth'
-                 if (fs.existsSync(sessionPath)) {
-                    await fs.promises.rm(sessionPath, { recursive: true, force: true })
-                 }
-             }
-             initialize() // Recria o cliente
+        // Se for LOGOUT explícito ou conflito de navegação, limpamos tudo.
+        if (reason === 'LOGOUT' || (reason as any) === 'NAVIGATION') {
+            console.log("Detectado Logout/Navegação crítica. Limpando sessão...")
+            await cleanSessionAndRestart()
         } else {
-            console.log("Desconexão temporária. O cliente tentará reconectar automaticamente...")
-            // Não fazemos nada drástico, deixamos a lib tentar o resume.
+            // Se for queda de net, deixamos o wwebjs tentar reconectar (não chamamos initialize aqui)
+            console.log("Desconexão leve. Aguardando tentativa automática de reconexão da lib...")
         }
     })
+}
+
+// Função auxiliar para limpeza segura
+async function cleanSessionAndRestart() {
+    try {
+        if (client) await client.destroy()
+    } catch (e) { console.log('Erro ao destruir cliente (ignorável):', e) }
+
+    const sessionPath = './.wwebjs_auth'
+    console.log(`Limpando pasta de sessão: ${sessionPath}`)
+
+    try {
+        if (fs.existsSync(sessionPath)) {
+            await fs.promises.rm(sessionPath, { recursive: true, force: true })
+            console.log("Pasta de sessão removida.")
+        }
+    } catch (err) {
+        console.error("Erro ao apagar pasta:", err)
+    }
+
+    console.log("Reiniciando em 5 segundos...")
+    setTimeout(initialize, 5000)
 }
 
 export function initialize() {
@@ -119,12 +127,8 @@ export function getClient(): Client {
     return client
 }
 
-// --- Tratamento de encerramento do servidor (CTRL+C) ---
-// Isso evita que o Chrome fique aberto em background travando a reconexão futura
 process.on('SIGINT', async () => {
-    console.log('(SIGINT) Fechando servidor e cliente WhatsApp...')
-    if (client) {
-        await client.destroy()
-    }
+    console.log('(SIGINT) Fechando servidor...')
+    if (client) await client.destroy()
     process.exit(0)
 })
