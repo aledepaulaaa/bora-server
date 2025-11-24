@@ -1,112 +1,134 @@
-//bora-server/src/services/whatsappBot.ts
+// bora-server/src/services/whatsappBot.ts
 import { Message } from 'whatsapp-web.js'
-import * as chrono from 'chrono-node'
 import admin from 'firebase-admin'
 import { getFirebaseFirestore } from '../database/firebase-admin'
-import { getClient } from './whatsappClient' // Importa a função para pegar o cliente
+import { getClient } from './whatsappClient'
+import { getUserSubscriptionPlan } from './subscription.service'
+import { processarIntencaoUsuario } from './geminiService' // Importa nosso service de IA
 
 const db = getFirebaseFirestore()
 
-/**
- * Ponto de entrada para todas as mensagens recebidas.
- * Determina o estado da conversa e delega para o handler apropriado.
- */
 export async function handleIncomingMessage(message: Message) {
     const chatId = message.from
-    const conversationRef = db.collection('whatsapp_conversations').doc(chatId)
-    const conversationDoc = await conversationRef.get()
-
-    // Lida com cliques em botões de dicas
-    if (message.type === 'buttons_response' && message.selectedButtonId === 'create_reminder_tip') {
-        await startReminderFlow(chatId)
-        return
-    }
-
-    // Se não há uma conversa ativa, ignora a mensagem de texto
-    if (!conversationDoc.exists) return
-
-    const state = conversationDoc.data()
-    if (!state) return
-
-    // Delega a resposta com base na etapa atual da conversa
-    switch (state.step) {
-        case 'awaiting_title':
-            await handleTitleResponse(message, conversationRef)
-            break
-        case 'awaiting_datetime':
-            await handleDateTimeResponse(message, conversationRef, state.userId)
-            break
-    }
-}
-
-/**
- * Inicia o fluxo de criação de lembrete via WhatsApp.
- */
-async function startReminderFlow(chatId: string) {
     const client = getClient()
+
+    // Ignora grupos e status
+    if (chatId.includes('@g.us') || chatId === 'status@broadcast') return
+
+    // 1. Identificar usuário
     const number = chatId.split('@')[0]
     const usersQuery = await db.collection('users').where('whatsappNumber', '==', number).limit(1).get()
 
-    if (usersQuery.empty) {
-        client.sendMessage(chatId, "Desculpe, não encontrei sua conta Bora. Verifique se o número de WhatsApp cadastrado no app está correto.")
-        return
-    }
-    const userId = usersQuery.docs[0].id
+    if (usersQuery.empty) return // Usuário não encontrado, ignora
 
-    await db.collection('whatsapp_conversations').doc(chatId).set({
-        step: 'awaiting_title',
-        userId: userId,
-    })
+    const userDoc = usersQuery.docs[0]
+    const userId = userDoc.id
+    const userData = userDoc.data()
+    const userName = userData.name?.split(' ')[0] || 'Usuário'
 
-    client.sendMessage(chatId, 'Ótimo! Qual o título do seu lembrete?')
-}
-
-/**
- * Lida com a resposta do título e avança para a próxima etapa.
- */
-async function handleTitleResponse(message: Message, conversationRef: admin.firestore.DocumentReference) {
-    const client = getClient()
-    const title = message.body
-    await conversationRef.update({
-        'reminderData.title': title,
-        step: 'awaiting_datetime',
-    })
-    client.sendMessage(message.from, `Entendido. E para quando é o lembrete "${title}"? (ex: amanhã às 15h, 25/12 18:00)`)
-}
-
-/**
- * Lida com a resposta de data/hora, salva o lembrete e finaliza o fluxo.
- */
-async function handleDateTimeResponse(message: Message, conversationRef: admin.firestore.DocumentReference, userId: string) {
-    const client = getClient()
-    const dateTimeString = message.body
-    const parsedDate = chrono.pt.parseDate(dateTimeString, new Date(), { forwardDate: true })
-
-    if (!parsedDate) {
-        client.sendMessage(message.from, 'Hum, não consegui entender essa data. 🤔 Tente um formato como "amanhã às 10:30" ou "25 de Dezembro às 20h".')
+    // 2. Verificar Plano (Apenas Premium usa a IA)
+    const subscription = await getUserSubscriptionPlan(userId)
+    if (subscription.plan !== 'premium') {
+        // Envia mensagem de upgrade apenas se o usuário mandar um comando explícito de criar, 
+        // para não responder "bom dia" com "assine o premium". 
+        // Como simplificação, respondemos uma vez e marcamos que avisamos (opcional).
+        // Por hora, apenas retornamos.
+        await client.sendMessage(chatId, "🔒 O assistente de IA por voz/texto é exclusivo para assinantes Premium.\nAcesse o app para assinar: https://www.aplicativobora.com.br/")
         return
     }
 
+    // 3. Comando de Cancelamento
+    if (message.body.toLowerCase() === 'cancelar') {
+        await db.collection('whatsapp_conversations').doc(chatId).delete()
+        await client.sendMessage(chatId, "👍 Conversa cancelada. Pode me pedir algo novo quando quiser!")
+        return
+    }
+
+    // 4. Obter Contexto Anterior (Conversa em andamento)
+    const conversationRef = db.collection('whatsapp_conversations').doc(chatId)
     const conversationDoc = await conversationRef.get()
-    const reminderData = conversationDoc.data()?.reminderData
+    let currentData = conversationDoc.exists ? conversationDoc.data()?.reminderData : null
+
+    // Feedback visual (Simulando digitação)
+    const chat = await message.getChat()
+    await chat.sendStateTyping()
 
     try {
-        await db.collection('reminders').add({
-            title: reminderData.title,
-            scheduledAt: admin.firestore.Timestamp.fromDate(parsedDate),
-            userId: userId,
-            createdAt: admin.firestore.Timestamp.now(),
-            sent: false,
-            recurrence: 'Não repetir',
-        })
+        // 5. Preparar Input (Texto ou Áudio)
+        let inputForAI: string | { mimeType: string; data: string }
 
-        await conversationRef.delete()
+        if (message.hasMedia) {
+            // É áudio ou imagem? Focamos em áudio PTT (push to talk) ou audio geral
+            if (message.type === 'ptt' || message.type === 'audio') {
+                const media = await message.downloadMedia()
+                if (!media) throw new Error("Falha ao baixar áudio")
 
-        const successMessage = `Lembrete salvo com sucesso para ${parsedDate.toLocaleString('pt-BR')}! ✨\n\nPara criar lembretes com recorrência, 
-        abra o app Bora e personalize do seu jeito! 😉\n\nhttps://www.aplicativobora.com.br/`
-        client.sendMessage(message.from, successMessage)
+                // O Gemini aceita base64 direto. O wwebjs já devolve media.data em base64.
+                inputForAI = { mimeType: media.mimetype, data: media.data }
+            } else {
+                await client.sendMessage(chatId, "Desculpe, por enquanto só entendo Texto ou Áudio. 😅")
+                return
+            }
+        } else {
+            inputForAI = message.body
+        }
+
+        // 6. Chamar a IA (Gemini)
+        const aiResponse = await processarIntencaoUsuario(inputForAI, userName, currentData)
+
+        // 7. Lógica de Decisão
+        if (aiResponse.isValid && aiResponse.reminderData?.title && aiResponse.reminderData?.scheduledAt) {
+
+            // --- CENÁRIO A: TUDO PRONTO, SALVAR! ---
+
+            const rData = aiResponse.reminderData
+            const scheduledDate = new Date(rData.scheduledAt!)
+
+            // Salvar no Firestore
+            await db.collection('reminders').add({
+                title: rData.title,
+                scheduledAt: admin.firestore.Timestamp.fromDate(scheduledDate),
+                userId: userId,
+                createdAt: admin.firestore.Timestamp.now(),
+                sent: false,
+                recurrence: rData.recurrence || 'Não repetir',
+                category: rData.category || 'Geral',
+                cor: rData.cor || '#BB86FC',
+                sobre: rData.sobre || '',
+                // Campos de controle
+                origin: 'whatsapp_bot'
+            })
+
+            // Atualiza estatística de uso gratuito (se aplicável, mas aqui é premium)
+            // Limpar conversa
+            await conversationRef.delete()
+
+            // Confirmar ao usuário
+            const dateStr = scheduledDate.toLocaleString('pt-BR', { weekday: 'long', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+            await client.sendMessage(chatId, `✅ Feito! Agendei: *${rData.title}* para ${dateStr}.\n\nSe precisar de mais alguma coisa, é só falar!`)
+
+        } else {
+
+            // --- CENÁRIO B: FALTA INFORMAÇÃO ---
+
+            // Salva o que a IA já entendeu (ex: Título ok, falta data) para a próxima mensagem
+            if (aiResponse.reminderData) {
+                await conversationRef.set({
+                    reminderData: aiResponse.reminderData,
+                    updatedAt: admin.firestore.Timestamp.now(),
+                    userId: userId
+                }, { merge: true })
+            }
+
+            // Envia a pergunta da IA (ex: "Para quando é o lembrete?")
+            const reply = aiResponse.missingInfo || "Entendi, mas preciso de mais detalhes. Para quando é?"
+            await client.sendMessage(chatId, reply)
+        }
+
     } catch (error) {
-        console.error("Erro ao salvar lembrete via WhatsApp:", error)
-        client.sendMessage(message.from, "Ocorreu um erro ao salvar seu lembrete. Tente novamente.")
+        console.error("Erro no fluxo do Bot:", error)
+        await client.sendMessage(chatId, "Tive um problema técnico para processar seu pedido. 😵‍💫 Tente novamente em alguns instantes.")
+    } finally {
+        await chat.clearState()
     }
 }

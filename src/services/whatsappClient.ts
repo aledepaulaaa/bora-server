@@ -1,7 +1,7 @@
 //bora-server/src/services/whatsappClient.ts
-import { Client, LocalAuth } from 'whatsapp-web.js'
-import qrcode from 'qrcode-terminal'
 import fs from 'fs'
+import qrcode from 'qrcode-terminal'
+import { Client, LocalAuth } from 'whatsapp-web.js'
 import { handleIncomingMessage } from './whatsappBot'
 import { startCronJobs, stopCronJobs } from './jobScheduler'
 // import puppeteer from 'puppeteer'
@@ -21,7 +21,6 @@ function createAndConfigureClient() {
                 '--disable-dev-shm-usage',
                 '--disable-gpu', // Desabilitar GPU é bom para ambientes de servidor sem interface gráfica
             ],
-            // <<< MELHORIA PRINCIPAL AQUI >>>
             // O User Agent abaixo é conhecido por ser estável e compatível com contas do WhatsApp Business.
             // Para satisfazer as tipagens do pacote, fazemos um cast para `any`.
             userAgent: 'Mozilla/5.0 (Macintosh Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',

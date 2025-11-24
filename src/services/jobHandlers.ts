@@ -3,7 +3,7 @@ import admin from 'firebase-admin'
 import { getFirebaseFirestore } from '../database/firebase-admin'
 import { IReminder } from '../interfaces/IReminder'
 import { encontrarNumeroCelular, enviarMensagemWhatsApp } from './jobWhatsApp'
-import { getUserSubscriptionPlan } from './subscription.service'
+import { canUserReceiveWhatsapp, getUserSubscriptionPlan, incrementWhatsappUsage } from './subscription.service'
 import { updateNextRecurrence, updateReminderSentStatus } from './reminder.service'
 
 const db = getFirebaseFirestore()
@@ -24,20 +24,14 @@ export async function enviarLembretesPessoais() {
     console.log('--- ⏰ INICIANDO JOB: Verificando lembretes no horário (WhatsApp)... ---')
     const now = new Date()
 
-    // DEFINIÇÃO DA JANELA DE SEGURANÇA (CRUCIAL PARA EVITAR SPAM)
-    // Vamos buscar apenas lembretes agendados entre 20 minutos atrás e Agora.
-    // Lembretes mais antigos que 20 min serão ignorados nesta rodada para evitar
-    // disparar 500 mensagens se o servidor ficou fora do ar por 2 dias.
+    // Janela de segurança de 20 min para evitar spam de servidor reiniciado
     const TOLERANCE_MINUTES = 20
     const windowStart = new Date(now.getTime() - TOLERANCE_MINUTES * 60000)
 
     const nowTimestamp = admin.firestore.Timestamp.fromDate(now)
     const windowStartTimestamp = admin.firestore.Timestamp.fromDate(windowStart)
 
-    console.log(`   - Janela de busca: ${windowStart.toISOString()} até ${now.toISOString()}`)
-
-    // Query Unificada (Lembretes únicos E recorrentes que não foram enviados)
-    // Adicionamos a cláusula .where('scheduledAt', '>=', windowStartTimestamp)
+    // Busca lembretes não enviados dentro da janela de tempo
     const snapshot = await db.collection('reminders')
         .where('sent', '==', false)
         .where('scheduledAt', '<=', nowTimestamp)
@@ -45,7 +39,7 @@ export async function enviarLembretesPessoais() {
         .get()
 
     if (snapshot.empty) {
-        console.log(`⏰ Nenhum lembrete pendente na janela de tempo (${TOLERANCE_MINUTES}min).`)
+        // console.log(`⏰ Nenhum lembrete pendente na janela de tempo.`) // Comentado para não poluir log a cada 2 min
         return
     }
 
@@ -55,44 +49,64 @@ export async function enviarLembretesPessoais() {
         const reminder = doc.data() as IReminder
         const isRecurring = reminder.recurrence && reminder.recurrence !== 'Não repetir'
 
-        console.log(`\n--- Processando Lembrete ID: ${doc.id} | Recorrente: ${isRecurring} ---`)
+        // --- 1. VERIFICAÇÃO DE PLANO E COTA ---
+        const userPlanInfo = await getUserSubscriptionPlan(reminder.userId)
 
-        // --- 1. VERIFICAÇÃO DE PLANO (Mantida) ---
-        if (isRecurring) {
-            const userPlan = await getUserSubscriptionPlan(reminder.userId)
-            // Lógica de restrição (ponto 1 do seu pedido):
-            // Aqui você pode expandir. Ex: Se for Plus, só aceita 'Diariamente'. Se Free, bloqueia.
-            if (userPlan.plan === 'free') {
-                console.log(`   - 🚫 Lembrete recorrente [${doc.id}] PULADO/DESATIVADO para usuário free.`)
-                // IMPORTANTE: Marque como enviado para não processar de novo em loop
+        // A. Regra para usuário FREE e Recorrência (Mantida)
+        if (isRecurring && userPlanInfo.plan === 'free') {
+            console.log(`   - 🚫 Lembrete recorrente [${doc.id}] PULADO para usuário free.`)
+            // Marca como enviado para não processar de novo
+            await updateReminderSentStatus(doc.id)
+            continue
+        }
+
+        // B. Regra para usuário PLUS e Cota Mensal (Nova)
+        const canReceive = await canUserReceiveWhatsapp(reminder.userId, userPlanInfo.plan)
+
+        if (!canReceive) {
+            console.log(`   - 🚫 Cota mensal excedida para usuário ${userPlanInfo.plan} [${reminder.userId}].`)
+
+            // Tratamento: Apenas pulamos o envio do WhatsApp, mas tratamos a recorrência
+            // como se tivesse sido processado, para o sistema continuar girando.
+            if (isRecurring) {
+                await updateNextRecurrence(doc.id, reminder.recurrence!, reminder.scheduledAt.toDate())
+            } else {
                 await updateReminderSentStatus(doc.id)
-                continue
             }
+            continue
         }
 
         // --- 2. ENVIO DA MENSAGEM ---
         const phoneNumber = await encontrarNumeroCelular(reminder.userId)
-        let messageSent = false
+        let messageSentSuccess = false
 
         if (phoneNumber) {
             const time = reminder.scheduledAt.toDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
             const message = `Bora veio te lembrar: "${reminder.title}" começa às ${time}!`
 
-            // Tenta enviar. Se der erro no whats, a gente decide se reagenda ou não.
+            // Tenta enviar
             const result = await enviarMensagemWhatsApp(phoneNumber, message)
-            messageSent = result && result.success ? true : false
+
+            if (result && result.success) {
+                messageSentSuccess = true
+                console.log(`   - ✅ Mensagem enviada para ${phoneNumber}`)
+
+                // >>> O QUE FALTAVA: INCREMENTAR O USO <<<
+                // Só desconta da cota se o envio foi sucesso
+                await incrementWhatsappUsage(reminder.userId)
+            } else {
+                console.error(`   - ❌ Falha no envio do WhatsApp: ${result?.error}`)
+            }
         } else {
             console.log(`   - ⚠️ Número NÃO encontrado para o usuário ${reminder.userId}.`)
         }
 
-        // --- 3. ATUALIZAÇÃO (CRUCIAL PARA EVITAR LOOP) ---
+        // --- 3. ATUALIZAÇÃO DO STATUS DO LEMBRETE ---
+        // Independente se enviou ou falhou (por erro técnico), nós atualizamos
+        // para não ficar travado tentando enviar o mesmo lembrete eternamente.
         if (isRecurring) {
-            // Se enviou (ou tentou), calculamos a próxima data
-            // Passamos 'now' para garantir que a próxima data seja baseada no momento da execução
-            // e não fique presa no passado.
             await updateNextRecurrence(doc.id, reminder.recurrence!, reminder.scheduledAt.toDate())
         } else {
-            // Lembrete único: marca como enviado para nunca mais pegar na query
             await updateReminderSentStatus(doc.id)
         }
     }
