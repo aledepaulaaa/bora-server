@@ -9,6 +9,8 @@ let client: Client
 // Variável de controle para impedir disparos múltiplos do evento 'ready'
 let isClientReady = false
 
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
 function createAndConfigureClient() {
     console.log("Iniciando nova instância do cliente WhatsApp...")
 
@@ -93,24 +95,51 @@ function createAndConfigureClient() {
 
 // Função auxiliar para limpeza segura
 async function cleanSessionAndRestart() {
-    try {
-        if (client) await client.destroy()
-    } catch (e) { console.log('Erro ao destruir cliente (ignorável):', e) }
+    console.log("🛑 Iniciando protocolo de limpeza e reinício...")
 
-    const sessionPath = './.wwebjs_auth'
-    console.log(`Limpando pasta de sessão: ${sessionPath}`)
-
+    // 1. Tenta destruir o cliente para fechar o navegador
     try {
-        if (fs.existsSync(sessionPath)) {
-            await fs.promises.rm(sessionPath, { recursive: true, force: true })
-            console.log("Pasta de sessão removida.")
+        if (client) {
+            await client.destroy()
+            console.log("   -> Cliente destruído. Aguardando liberação de arquivos...")
         }
-    } catch (err) {
-        console.error("Erro ao apagar pasta:", err)
+    } catch (e) {
+        console.log('   -> Erro ao destruir cliente (ignorável):', e)
     }
 
-    console.log("Reiniciando em 5 segundos...")
-    setTimeout(initialize, 5000)
+    // 2. CRUCIAL: Espera 3 segundos para o Sistema Operacional liberar os arquivos do Chrome
+    await delay(3000)
+
+    const sessionPath = './.wwebjs_auth'
+    console.log(`   -> Tentando apagar pasta de sessão: ${sessionPath}`)
+
+    // 3. Tenta apagar com lógica de retentativa (Retry)
+    try {
+        if (fs.existsSync(sessionPath)) {
+            // Tenta a primeira vez
+            await fs.promises.rm(sessionPath, { recursive: true, force: true })
+            console.log("   ✅ Pasta de sessão removida com sucesso.")
+        }
+    } catch (err: any) {
+        console.warn(`   ⚠️ Primeira tentativa de limpeza falhou (${err.code}). Tentando novamente em 2s...`)
+
+        // Se falhou (ENOTEMPTY), espera mais um pouco e tenta de novo com força
+        await delay(2000)
+
+        try {
+            if (fs.existsSync(sessionPath)) {
+                await fs.promises.rm(sessionPath, { recursive: true, force: true })
+                console.log("   ✅ Pasta removida na segunda tentativa.")
+            }
+        } catch (finalErr) {
+            console.error("   ❌ FALHA FINAL ao limpar pasta. O servidor tentará reiniciar mesmo assim.", finalErr)
+            // Não damos throw aqui para não derrubar o servidor, deixamos ele tentar criar por cima ou falhar no init
+        }
+    }
+
+    console.log("🔄 Reiniciando serviço em 2 segundos...")
+    await delay(2000)
+    initialize()
 }
 
 export function initialize() {

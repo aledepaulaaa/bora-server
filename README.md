@@ -136,5 +136,4 @@ Desenvolvido por Alexandre de Paula — https://github.com/aledepaulaaa
 
 Licença 📜
 ---------
-Verifique o arquivo de licença do projeto (se aplicável).  
 Boa sorte — e mãos à obra! 👨‍💻✨
